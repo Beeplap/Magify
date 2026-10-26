@@ -16,6 +16,10 @@ static const GUID  GUID_EncoderQuality = { 0x1d5be4b5, 0xfa4a, 0x452d, { 0x9c, 0
 #define PixelFormat32bppARGB 0x26200A
 #define PixelFormat24bppRGB  0x21808
 
+#ifndef SafeRelease
+#define SafeRelease(p) do { if ((p)) { (p)->lpVtbl->Release(p); (p) = NULL; } } while (0)
+#endif
+
 BOOL Magify_Image_Init(void) {
     if (g_gdiplusInitCount++ > 0) return TRUE;
     GdiplusStartupInput input = { 1, NULL, FALSE, FALSE };
@@ -41,86 +45,64 @@ HRESULT Magify_WIC_DecodeToPixels(const WCHAR *filePath, uint32_t **outPixels, i
     CoInitialize(NULL);
 
     IWICImagingFactory *pFactory = NULL;
+    IWICBitmapDecoder *pDecoder = NULL;
+    IWICBitmapFrameDecode *pFrame = NULL;
+    IWICFormatConverter *pConverter = NULL;
+    uint32_t *pixels = NULL;
+
     HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                   &IID_IWICImagingFactory, (void**)&pFactory);
-    if (FAILED(hr) || !pFactory) return hr;
+    if (FAILED(hr) || !pFactory) goto cleanup;
 
-    IWICBitmapDecoder *pDecoder = NULL;
     hr = IWICImagingFactory_CreateDecoderFromFilename(
         pFactory, filePath, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &pDecoder);
-    if (FAILED(hr) || !pDecoder) {
-        IWICImagingFactory_Release(pFactory);
-        return hr;
-    }
+    if (FAILED(hr) || !pDecoder) goto cleanup;
 
-    IWICBitmapFrameDecode *pFrame = NULL;
     hr = IWICBitmapDecoder_GetFrame(pDecoder, 0, &pFrame);
-    if (FAILED(hr) || !pFrame) {
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return hr;
-    }
+    if (FAILED(hr) || !pFrame) goto cleanup;
 
     UINT w = 0, h = 0;
     hr = IWICBitmapFrameDecode_GetSize(pFrame, &w, &h);
     if (FAILED(hr) || w == 0 || h == 0) {
-        IWICBitmapFrameDecode_Release(pFrame);
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return hr;
+        if (SUCCEEDED(hr)) hr = E_FAIL;
+        goto cleanup;
     }
 
-    IWICFormatConverter *pConverter = NULL;
     hr = IWICImagingFactory_CreateFormatConverter(pFactory, &pConverter);
-    if (FAILED(hr) || !pConverter) {
-        IWICBitmapFrameDecode_Release(pFrame);
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return hr;
-    }
+    if (FAILED(hr) || !pConverter) goto cleanup;
 
     hr = IWICFormatConverter_Initialize(
         pConverter, (IWICBitmapSource*)pFrame,
         &GUID_WICPixelFormat32bppBGRA,
         WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom);
-    if (FAILED(hr)) {
-        IWICFormatConverter_Release(pConverter);
-        IWICBitmapFrameDecode_Release(pFrame);
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return hr;
-    }
+    if (FAILED(hr)) goto cleanup;
 
     UINT stride = w * 4;
     UINT bufSize = stride * h;
-    uint32_t *pixels = (uint32_t*)malloc(bufSize);
+    pixels = (uint32_t*)malloc(bufSize);
     if (!pixels) {
-        IWICFormatConverter_Release(pConverter);
-        IWICBitmapFrameDecode_Release(pFrame);
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return E_OUTOFMEMORY;
+        hr = E_OUTOFMEMORY;
+        goto cleanup;
     }
 
     hr = IWICFormatConverter_CopyPixels(pConverter, NULL, stride, bufSize, (BYTE*)pixels);
     if (FAILED(hr)) {
         free(pixels);
-        IWICFormatConverter_Release(pConverter);
-        IWICBitmapFrameDecode_Release(pFrame);
-        IWICBitmapDecoder_Release(pDecoder);
-        IWICImagingFactory_Release(pFactory);
-        return hr;
+        pixels = NULL;
+        goto cleanup;
     }
 
     *outPixels = pixels;
     *outW = (int)w;
     *outH = (int)h;
+    hr = S_OK;
 
-    IWICFormatConverter_Release(pConverter);
-    IWICBitmapFrameDecode_Release(pFrame);
-    IWICBitmapDecoder_Release(pDecoder);
-    IWICImagingFactory_Release(pFactory);
-    return S_OK;
+cleanup:
+    SafeRelease(pConverter);
+    SafeRelease(pFrame);
+    SafeRelease(pDecoder);
+    SafeRelease(pFactory);
+    return hr;
 }
 
 GpBitmap *Magify_Image_LoadBitmap(const WCHAR *filePath, void **outPixelBuffer) {
@@ -228,31 +210,29 @@ BOOL Magify_LoadImageDimensions(const WCHAR *srcPath, int *outW, int *outH) {
     // WIC dimension query fallback
     CoInitialize(NULL);
     IWICImagingFactory *pFactory = NULL;
+    IWICBitmapDecoder *pDecoder = NULL;
+    IWICBitmapFrameDecode *pFrame = NULL;
+    BOOL success = FALSE;
+
     if (SUCCEEDED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
                                    &IID_IWICImagingFactory, (void**)&pFactory)) && pFactory) {
-        IWICBitmapDecoder *pDecoder = NULL;
         if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(
                 pFactory, srcPath, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &pDecoder)) && pDecoder) {
-            IWICBitmapFrameDecode *pFrame = NULL;
             if (SUCCEEDED(IWICBitmapDecoder_GetFrame(pDecoder, 0, &pFrame)) && pFrame) {
                 UINT w = 0, h = 0;
-                IWICBitmapFrameDecode_GetSize(pFrame, &w, &h);
-                IWICBitmapFrameDecode_Release(pFrame);
-                IWICBitmapDecoder_Release(pDecoder);
-                IWICImagingFactory_Release(pFactory);
-                if (w > 0 && h > 0) {
+                if (SUCCEEDED(IWICBitmapFrameDecode_GetSize(pFrame, &w, &h)) && w > 0 && h > 0) {
                     *outW = (int)w;
                     *outH = (int)h;
-                    return TRUE;
+                    success = TRUE;
                 }
-                return FALSE;
             }
-            IWICBitmapDecoder_Release(pDecoder);
         }
-        IWICImagingFactory_Release(pFactory);
     }
 
-    return FALSE;
+    SafeRelease(pFrame);
+    SafeRelease(pDecoder);
+    SafeRelease(pFactory);
+    return success;
 }
 
 static DWORD WINAPI ConvertWorker(void *arg) {

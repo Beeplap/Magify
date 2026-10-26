@@ -35,7 +35,16 @@ static const int TEXT_SCRATCH_H = 80;
 static float g_sliceHover[8] = {0};
 static float g_hubHover = 0.0f;
 
+static BOOL s_themeCached = FALSE;
+static BOOL s_cachedIsLight = FALSE;
+static DWORD s_lastThemeQueryTick = 0;
+
 BOOL Magify_IsSystemLightTheme(void) {
+    DWORD now = GetTickCount();
+    if (s_themeCached && (now - s_lastThemeQueryTick < 2000)) {
+        return s_cachedIsLight;
+    }
+
     HKEY hKey;
     DWORD value = 0;
     DWORD size = sizeof(value);
@@ -46,11 +55,17 @@ BOOL Magify_IsSystemLightTheme(void) {
     if (res == ERROR_SUCCESS) {
         if (RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (LPBYTE)&value, &size) == ERROR_SUCCESS) {
             RegCloseKey(hKey);
-            return (value != 0);
+            s_cachedIsLight = (value != 0);
+            s_themeCached = TRUE;
+            s_lastThemeQueryTick = now;
+            return s_cachedIsLight;
         }
         RegCloseKey(hKey);
     }
-    return FALSE; // Default to dark mode
+    s_cachedIsLight = FALSE; // Default to dark mode
+    s_themeCached = TRUE;
+    s_lastThemeQueryTick = now;
+    return FALSE;
 }
 
 MagifyThemePalette Magify_GetActiveTheme(void) {
@@ -1751,6 +1766,16 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
             SetTimer(hwnd, TIMER_ANIM_ID, ANIM_INTERVAL_MS, NULL);
             SetTimer(hwnd, TIMER_CARET_ID, 500, NULL);
+            return 0;
+        }
+
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED: {
+            s_themeCached = FALSE;
+            if (ctx) {
+                ctx->themePalette = Magify_GetActiveTheme();
+                RenderFrame(ctx);
+            }
             return 0;
         }
 

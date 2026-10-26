@@ -144,6 +144,24 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             return 0;
         }
 
+        case WM_SETTINGCHANGE:
+        case WM_THEMECHANGED: {
+            BOOL isLight = Magify_IsSystemLightTheme();
+            BOOL dark = !isLight;
+            DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
+            if (g_hBrushBg) DeleteObject(g_hBrushBg);
+            if (g_hBrushCard) DeleteObject(g_hBrushCard);
+            if (isLight) {
+                g_hBrushBg = CreateSolidBrush(RGB(248, 250, 252));
+                g_hBrushCard = CreateSolidBrush(RGB(241, 245, 249));
+            } else {
+                g_hBrushBg = CreateSolidBrush(RGB(18, 19, 26));
+                g_hBrushCard = CreateSolidBrush(RGB(26, 29, 42));
+            }
+            InvalidateRect(hwnd, NULL, TRUE);
+            return 0;
+        }
+
         case WM_DRAWITEM: {
             LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
             if (dis->CtlID == BTN_TOGGLE_REG) {

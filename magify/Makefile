@@ -1,7 +1,7 @@
 CC ?= gcc
 WINDRES ?= windres
 
-CFLAGS = -std=c11 -O3 -Wall -Wextra -municode -mwindows -Iinclude -Ithird_party
+CFLAGS = -std=c11 -O3 -Wall -Wextra -Werror -municode -mwindows -Iinclude -Ithird_party
 LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
 
 SRCS = src/main.c src/ipc.c src/registry.c src/com_extension.c src/ui_overlay.c \
@@ -37,7 +37,7 @@ uninstall: $(TARGET)
 	$(TARGET) --uninstall
 
 test: $(TARGET)
-	$(CC) -std=c11 -O3 -Wall -Wextra -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
+	$(CC) -std=c11 -O3 -Wall -Wextra -Werror -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
 	build/test_core.exe
 
 .PHONY: all clean install uninstall test

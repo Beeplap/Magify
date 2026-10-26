@@ -17,7 +17,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 1. File Classification & Magic Bytes
     // ---------------------------------------------------------
-    printf("[1/17] Testing File Magic-Byte & Extension Classification...\n");
+    printf("[1/21] Testing File Magic-Byte & Extension Classification...\n");
     MagifyFileClass imgClass = Magify_DetectFileClass(L"test_assets\\sample.png");
     printf("  sample.png: %d (expected %d)\n", imgClass, FILE_CLASS_IMAGE);
     assert(imgClass == FILE_CLASS_IMAGE);
@@ -33,7 +33,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 2. File Size Formatting & Hit-Testing
     // ---------------------------------------------------------
-    printf("\n[2/17] Testing Formatting & Polar Hit-Testing...\n");
+    printf("\n[2/21] Testing Formatting & Polar Hit-Testing...\n");
     WCHAR sizeStr[32];
     Magify_FormatFileSize(512, sizeStr, 32);
     wprintf(L"  512 B: %ls\n", sizeStr);
@@ -57,7 +57,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 3. ZIP Archive Creation (Pure C11 PKZIP)
     // ---------------------------------------------------------
-    printf("\n[3/17] Testing PKZIP Archive Creation...\n");
+    printf("\n[3/21] Testing PKZIP Archive Creation...\n");
     MagifyContext zipCtx;
     memset(&zipCtx, 0, sizeof(zipCtx));
     wcscpy(zipCtx.files[0], L"test_assets\\test_pattern.bmp");
@@ -84,7 +84,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 4. File Rename Operations
     // ---------------------------------------------------------
-    printf("\n[4/17] Testing Atomic & Batch Rename...\n");
+    printf("\n[4/21] Testing Atomic & Batch Rename...\n");
     CopyFileW(L"test_assets\\test_pattern.bmp", L"test_assets\\temp_rename_me.bmp", FALSE);
     MagifyContext renCtx;
     memset(&renCtx, 0, sizeof(renCtx));
@@ -100,7 +100,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 5. GDI+ Image Engine: Dimensions & Conversion
     // ---------------------------------------------------------
-    printf("\n[5/17] Testing GDI+ Engine Dimensions & Format Conversion...\n");
+    printf("\n[5/21] Testing GDI+ Engine Dimensions & Format Conversion...\n");
     Magify_Image_Init();
     int imgW = 0, imgH = 0;
     BOOL dimOk = Magify_LoadImageDimensions(L"test_assets\\test_pattern.bmp", &imgW, &imgH);
@@ -127,7 +127,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 6. Image Rotate, Crop & Target Compression
     // ---------------------------------------------------------
-    printf("\n[6/17] Testing Image Rotate 90°, Crop & Target Compression...\n");
+    printf("\n[6/21] Testing Image Rotate 90°, Crop & Target Compression...\n");
     // Rotate 90
     DeleteFileW(L"test_assets\\test_pattern_converted_rot90.png");
     Magify_Image_Rotate(L"test_assets\\test_pattern_converted.png", 90, &imgCtx);
@@ -164,7 +164,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 7. Image(s) -> Native PDF 1.4 Generation
     // ---------------------------------------------------------
-    printf("\n[7/17] Testing Image(s) -> Native PDF 1.4 Generator...\n");
+    printf("\n[7/21] Testing Image(s) -> Native PDF 1.4 Generator...\n");
     const WCHAR *pdfInFiles[2] = {
         L"test_assets\\test_pattern_converted.png",
         L"test_assets\\sample.png"
@@ -191,7 +191,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 8. Multi-Page PDF Generation (Test Fixture)
     // ---------------------------------------------------------
-    printf("\n[8/17] Generating Multi-Page Test PDF with Embedded Streams...\n");
+    printf("\n[8/21] Generating Multi-Page Test PDF with Embedded Streams...\n");
     const WCHAR *multiPagesIn[3] = {
         L"test_assets\\test_pattern_converted.png",
         L"test_assets\\sample.png",
@@ -211,7 +211,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 9. Fast In-Memory PDF Object & Page-Tree Parser
     // ---------------------------------------------------------
-    printf("\n[9/17] Testing In-Memory PDF Object & Page-Tree Engine...\n");
+    printf("\n[9/21] Testing In-Memory PDF Object & Page-Tree Engine...\n");
     MagifyPdfDoc *doc = Magify_PdfDoc_Open(multiPdfOut);
     assert(doc != NULL);
     printf("  Parsed PDF: %d objects, %d pages detected\n", doc->objectCount, doc->pageCount);
@@ -228,7 +228,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 10. Lossless Structural PDF Rotation
     // ---------------------------------------------------------
-    printf("\n[10/17] Testing Lossless Structural PDF Rotation (90° CW)...\n");
+    printf("\n[10/21] Testing Lossless Structural PDF Rotation (90° CW)...\n");
     const WCHAR *rotOut = L"test_assets\\sample_multi_rot90.pdf";
     DeleteFileW(rotOut);
     BOOL rotOk = Magify_PdfRotateAllSync(multiPdfOut, rotOut, 90);
@@ -247,7 +247,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 11. Multi-PDF Merge Engine
     // ---------------------------------------------------------
-    printf("\n[11/17] Testing Multi-PDF Merge Engine...\n");
+    printf("\n[11/21] Testing Multi-PDF Merge Engine...\n");
     const WCHAR *mergeList[2] = { multiPdfOut, rotOut };
     const WCHAR *mergeOut = L"test_assets\\sample_multi_merged.pdf";
     DeleteFileW(mergeOut);
@@ -264,7 +264,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 12. Lossless PDF Split (Custom Range & Burst)
     // ---------------------------------------------------------
-    printf("\n[12/17] Testing Lossless PDF Split (Range & Burst)...\n");
+    printf("\n[12/21] Testing Lossless PDF Split (Range & Burst)...\n");
     const WCHAR *splitOut = L"test_assets\\sample_split.pdf";
     DeleteFileW(splitOut);
     BOOL splitRangeOk = Magify_PdfSplitSync(multiPdfOut, L"1-2", splitOut);
@@ -287,7 +287,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 13. PDF Stream Compression
     // ---------------------------------------------------------
-    printf("\n[13/17] Testing PDF Stream Compression & Downsampling...\n");
+    printf("\n[13/21] Testing PDF Stream Compression & Downsampling...\n");
     const WCHAR *compOut = L"test_assets\\sample_multi_compressed.pdf";
     DeleteFileW(compOut);
     int savingsPct = 0;
@@ -305,7 +305,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 14. Visual Page Organizer HUD State & Changes Application
     // ---------------------------------------------------------
-    printf("\n[14/17] Testing Visual Page Organizer State & Changes Application...\n");
+    printf("\n[14/21] Testing Visual Page Organizer State & Changes Application...\n");
     MagifyContext orgCtx;
     memset(&orgCtx, 0, sizeof(orgCtx));
     wcscpy(orgCtx.files[0], multiPdfOut);
@@ -350,7 +350,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 15. Safe Output Path, Collision Avoidance & In-Place Overwrite
     // ---------------------------------------------------------
-    printf("\n[15/17] Testing Safe Output Path & Shift+Click Overwrite...\n");
+    printf("\n[15/21] Testing Safe Output Path & Shift+Click Overwrite...\n");
     WCHAR safeOut[MAX_PATH], tmpPath[MAX_PATH];
     
     // Non-destructive naming with collision avoidance
@@ -389,7 +389,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 16. Size-Savings Toast Delta Report
     // ---------------------------------------------------------
-    printf("\n[16/17] Testing Size-Savings Toast Delta Formatting...\n");
+    printf("\n[16/21] Testing Size-Savings Toast Delta Formatting...\n");
     WCHAR toastReport[128];
     // 4.1 MB -> 1.2 MB (-70%)
     uint64_t bOrig = (uint64_t)(4.1 * 1024 * 1024);
@@ -408,7 +408,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 17. Thread-Safe Worker Cancellation & State Cleanliness
     // ---------------------------------------------------------
-    printf("\n[17/17] Testing Worker Launch & Graceful Thread Cancellation...\n");
+    printf("\n[17/21] Testing Worker Launch & Graceful Thread Cancellation...\n");
     MagifyContext workerCtx;
     memset(&workerCtx, 0, sizeof(workerCtx));
     wcscpy(workerCtx.files[0], L"test_assets\\sample.png");
@@ -426,7 +426,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 18. Windows 11 Modern IExplorerCommand & ContextMenus COM Registry
     // ---------------------------------------------------------
-    printf("\n[18/18] Testing Windows 11 IExplorerCommand COM & Modern Context Menu Registration...\n");
+    printf("\n[18/21] Testing Windows 11 IExplorerCommand COM & Modern Context Menu Registration...\n");
     // Test registration
     BOOL regOk = Magify_RegisterContextMenu();
     assert(regOk);
@@ -495,7 +495,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 19. Windows System Theme Sync (Dark / Light Mode)
     // ---------------------------------------------------------
-    printf("\n[19/20] Testing Windows System Theme Sync & Palette Architecture...\n");
+    printf("\n[19/21] Testing Windows System Theme Sync & Palette Architecture...\n");
     BOOL isLight = Magify_IsSystemLightTheme();
     printf("  Current Windows System Theme: %s Mode\n", isLight ? "Light" : "Dark");
     MagifyThemePalette palette = Magify_GetActiveTheme();
@@ -519,7 +519,7 @@ int wmain(void) {
     // ---------------------------------------------------------
     // 20. Native WIC Hardware-Accelerated Decoders (WebP / HEIC)
     // ---------------------------------------------------------
-    printf("\n[20/20] Testing Native WIC Decoders & Modern Image Support...\n");
+    printf("\n[20/21] Testing Native WIC Decoders & Modern Image Support...\n");
     // Verify file class recognition for modern formats
     assert(Magify_DetectFileClass(L"photo.heic") == FILE_CLASS_IMAGE);
     assert(Magify_DetectFileClass(L"photo.heif") == FILE_CLASS_IMAGE);
@@ -527,7 +527,61 @@ int wmain(void) {
     assert(Magify_DetectFileClass(L"image.avif") == FILE_CLASS_IMAGE);
     printf("  Verified modern format detection: .heic, .heif, .webp, .avif -> FILE_CLASS_IMAGE\n");
 
-    // Test WIC decode on test assets
+    // Create mock WebP file with standard RIFF WEBP VP8 header
+    static const uint8_t s_mockWebpBytes[] = {
+        'R', 'I', 'F', 'F', 0x1e, 0x00, 0x00, 0x00, 'W', 'E', 'B', 'P',
+        'V', 'P', '8', ' ', 0x12, 0x00, 0x00, 0x00,
+        0x30, 0x01, 0x00, 0x9d, 0x01, 0x2a, 0x01, 0x00, 0x01, 0x00,
+        0x02, 0x00, 0x34, 0x25, 0xa4, 0x00, 0x03, 0x70
+    };
+    HANDLE hWebp = CreateFileW(L"test_assets\\mock.webp", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hWebp != INVALID_HANDLE_VALUE) {
+        DWORD bw2 = 0;
+        WriteFile(hWebp, s_mockWebpBytes, sizeof(s_mockWebpBytes), &bw2, NULL);
+        CloseHandle(hWebp);
+    }
+
+    // Create mock HEIC file with ISO BMFF ftyp heic header
+    static const uint8_t s_mockHeicBytes[] = {
+        0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p',
+        'h', 'e', 'i', 'c', 0x00, 0x00, 0x00, 0x00,
+        'm', 'i', 'f', '1', 'h', 'e', 'i', 'c'
+    };
+    HANDLE hHeic = CreateFileW(L"test_assets\\mock.heic", GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hHeic != INVALID_HANDLE_VALUE) {
+        DWORD bw2 = 0;
+        WriteFile(hHeic, s_mockHeicBytes, sizeof(s_mockHeicBytes), &bw2, NULL);
+        CloseHandle(hHeic);
+    }
+
+    // Verify magic byte and extension detection on mock files
+    assert(Magify_DetectFileClass(L"test_assets\\mock.webp") == FILE_CLASS_IMAGE);
+    assert(Magify_DetectFileClass(L"test_assets\\mock.heic") == FILE_CLASS_IMAGE);
+    printf("  Verified mock .webp and .heic files classified as FILE_CLASS_IMAGE\n");
+
+    // Test WIC decoder fallback routing on mock .webp
+    int webpW = 0, webpH = 0;
+    BOOL webpDimOk = Magify_LoadImageDimensions(L"test_assets\\mock.webp", &webpW, &webpH);
+    void *webpBuf = NULL;
+    GpBitmap *webpBmp = Magify_Image_LoadBitmap(L"test_assets\\mock.webp", &webpBuf);
+    printf("  WIC fallback routing on mock.webp: DimResult=%d (%dx%d), BitmapLoaded=%s\n",
+           webpDimOk, webpW, webpH, webpBmp ? "YES" : "NO (Clean Fallback)");
+    if (webpBmp) {
+        Magify_Image_FreeBitmap(webpBmp, webpBuf);
+    }
+
+    // Test WIC decoder fallback routing on mock .heic
+    int heicW = 0, heicH = 0;
+    BOOL heicDimOk = Magify_LoadImageDimensions(L"test_assets\\mock.heic", &heicW, &heicH);
+    void *heicBuf = NULL;
+    GpBitmap *heicBmp = Magify_Image_LoadBitmap(L"test_assets\\mock.heic", &heicBuf);
+    printf("  WIC fallback routing on mock.heic: DimResult=%d (%dx%d), BitmapLoaded=%s\n",
+           heicDimOk, heicW, heicH, heicBmp ? "YES" : "NO (Clean Fallback)");
+    if (heicBmp) {
+        Magify_Image_FreeBitmap(heicBmp, heicBuf);
+    }
+
+    // Test standard WIC decode on test PNG asset
     uint32_t *wicPixels = NULL;
     int wicW = 0, wicH = 0;
     HRESULT hrWic = Magify_WIC_DecodeToPixels(L"test_assets\\sample.png", &wicPixels, &wicW, &wicH);
@@ -551,10 +605,32 @@ int wmain(void) {
     Magify_Image_FreeBitmap(testBmp, loadedBuf);
     printf("  Magify_Image_FreeBitmap disposed successfully without leaks.\n");
 
+    // ---------------------------------------------------------
+    // 21. End-to-End Installer & Packaging Verification
+    // ---------------------------------------------------------
+    printf("\n[21/21] Testing End-to-End Installer & Shortcut Verification...\n");
+    WCHAR localApp[MAX_PATH];
+    ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\Magify\\magify.exe", localApp, MAX_PATH);
+    DWORD attr = GetFileAttributesW(localApp);
+    BOOL exeExists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+    printf("  Installed binary check: %ls -> %s\n", localApp, exeExists ? "FOUND" : "NOT FOUND");
+    assert(exeExists);
+
+    WCHAR deskLnk[MAX_PATH];
+    ExpandEnvironmentStringsW(L"%USERPROFILE%\\Desktop\\Magify.lnk", deskLnk, MAX_PATH);
+    BOOL deskExists = (GetFileAttributesW(deskLnk) != INVALID_FILE_ATTRIBUTES);
+    printf("  Desktop shortcut check: %ls -> %s\n", deskLnk, deskExists ? "FOUND" : "NOT FOUND");
+    assert(deskExists);
+
+    BOOL isReg = Magify_IsRegistered();
+    printf("  Modern Windows 11 Context Menu registration status: %s\n", isReg ? "ACTIVE" : "INACTIVE");
+    assert(isReg);
+    printf("  Installer verification completed with 100%% success!\n");
+
     Magify_Image_Shutdown();
 
     printf("\n====================================================\n");
-    printf("  ✨ ALL 20 TEST SUITES PASSED WITH 100%% SUCCESS!  \n");
+    printf("  ✨ ALL 21 TEST SUITES PASSED WITH 100%% SUCCESS!  \n");
     printf("====================================================\n");
     return 0;
 }
