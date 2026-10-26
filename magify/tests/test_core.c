@@ -1,4 +1,6 @@
 #include "magify.h"
+#include "registry.h"
+#include "com_extension.h"
 #include "ui_overlay.h"
 #include "ops_common.h"
 #include "ops_image.h"
@@ -421,10 +423,79 @@ int wmain(void) {
     assert(workerCtx.hWorkerThread == NULL);
     printf("  Worker cancellation verified cleanly with zero hanging threads!\n");
 
+    // ---------------------------------------------------------
+    // 18. Windows 11 Modern IExplorerCommand & ContextMenus COM Registry
+    // ---------------------------------------------------------
+    printf("\n[18/18] Testing Windows 11 IExplorerCommand COM & Modern Context Menu Registration...\n");
+    // Test registration
+    BOOL regOk = Magify_RegisterContextMenu();
+    assert(regOk);
+    assert(Magify_IsRegistered());
+
+    // Verify CLSID and LocalServer32
+    HKEY hClsid = NULL;
+    WCHAR clsidSub[160];
+    swprintf(clsidSub, 160, L"Software\\Classes\\CLSID\\%ls\\LocalServer32", MAGIFY_CLSID_STR);
+    LONG qRes = RegOpenKeyExW(HKEY_CURRENT_USER, clsidSub, 0, KEY_READ, &hClsid);
+    assert(qRes == ERROR_SUCCESS);
+    WCHAR srvCmd[MAX_PATH + 32] = {0};
+    DWORD srvBytes = sizeof(srvCmd);
+    RegQueryValueExW(hClsid, NULL, NULL, NULL, (LPBYTE)srvCmd, &srvBytes);
+    RegCloseKey(hClsid);
+    wprintf(L"  Registered LocalServer32: %ls\n", srvCmd);
+    assert(wcsstr(srvCmd, L"-Embedding") != NULL);
+
+    // Verify Windows 11 modern ContextMenus key
+    HKEY hModern = NULL;
+    LONG mRes = RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\*\\ContextMenus\\Magify", 0, KEY_READ, &hModern);
+    assert(mRes == ERROR_SUCCESS);
+    WCHAR delExec[64] = {0};
+    DWORD delBytes = sizeof(delExec);
+    RegQueryValueExW(hModern, L"DelegateExecute", NULL, NULL, (LPBYTE)delExec, &delBytes);
+    RegCloseKey(hModern);
+    assert(wcscmp(delExec, MAGIFY_CLSID_STR) == 0);
+    printf("  Verified modern Windows 11 ContextMenus key with DelegateExecute = %ls\n", delExec);
+
+    // Verify Pure-C COM IExplorerCommand Interface & Vtable
+    CoInitialize(NULL);
+    IClassFactory *pFactory = Magify_GetClassFactory();
+    assert(pFactory != NULL);
+    IExplorerCommand *pCmd = NULL;
+    HRESULT hrInst = pFactory->lpVtbl->CreateInstance(pFactory, NULL, &IID_IExplorerCommand, (void**)&pCmd);
+    assert(SUCCEEDED(hrInst) && pCmd != NULL);
+
+    LPWSTR title = NULL;
+    assert(SUCCEEDED(pCmd->lpVtbl->GetTitle(pCmd, NULL, &title)));
+    wprintf(L"  IExplorerCommand::GetTitle() -> \"%ls\"\n", title);
+    assert(wcscmp(title, L"Modify with Magify") == 0);
+    CoTaskMemFree(title);
+
+    LPWSTR icon = NULL;
+    assert(SUCCEEDED(pCmd->lpVtbl->GetIcon(pCmd, NULL, &icon)));
+    wprintf(L"  IExplorerCommand::GetIcon()  -> \"%ls\"\n", icon);
+    assert(wcsstr(icon, L",0") != NULL);
+    CoTaskMemFree(icon);
+
+    EXPCMDSTATE cmdState = ECS_DISABLED;
+    assert(SUCCEEDED(pCmd->lpVtbl->GetState(pCmd, NULL, FALSE, &cmdState)));
+    assert(cmdState == ECS_ENABLED);
+
+    EXPCMDFLAGS cmdFlags = 99;
+    assert(SUCCEEDED(pCmd->lpVtbl->GetFlags(pCmd, &cmdFlags)));
+    assert(cmdFlags == ECF_DEFAULT);
+
+    GUID canGuid;
+    assert(SUCCEEDED(pCmd->lpVtbl->GetCanonicalName(pCmd, &canGuid)));
+    assert(IsEqualGUID(&canGuid, &CLSID_MagifyExplorerCommand));
+
+    pCmd->lpVtbl->Release(pCmd);
+    CoUninitialize();
+    printf("  Pure-C COM IExplorerCommand virtual table & methods validated 100%%!\n");
+
     Magify_Image_Shutdown();
 
     printf("\n====================================================\n");
-    printf("  ✨ ALL 17 TEST SUITES PASSED WITH 100%% SUCCESS!  \n");
+    printf("  ✨ ALL 18 TEST SUITES PASSED WITH 100%% SUCCESS!  \n");
     printf("====================================================\n");
     return 0;
 }

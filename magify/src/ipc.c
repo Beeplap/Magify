@@ -7,8 +7,8 @@ static HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 static HANDLE g_hThread = NULL;
 static MagifyContext *g_ipcCtx = NULL;
 
-BOOL Magify_IPC_SendPathsToPrimary(int argc, WCHAR **argv) {
-    if (argc <= 1) return FALSE;
+BOOL Magify_IPC_SendFileList(const WCHAR **paths, int count) {
+    if (!paths || count <= 0) return FALSE;
 
     // Check if pipe exists with a quick wait
     if (!WaitNamedPipeW(MAGIFY_PIPE_NAME, 45)) {
@@ -30,9 +30,9 @@ BOOL Magify_IPC_SendPathsToPrimary(int argc, WCHAR **argv) {
     }
 
     DWORD bytesWritten;
-    // Send each argument path
-    for (int i = 1; i < argc; i++) {
-        const WCHAR *path = argv[i];
+    // Send each path
+    for (int i = 0; i < count; i++) {
+        const WCHAR *path = paths[i];
         if (!path || wcslen(path) == 0) continue;
         if (path[0] == L'-') continue; // Skip flags
 
@@ -47,6 +47,11 @@ BOOL Magify_IPC_SendPathsToPrimary(int argc, WCHAR **argv) {
     FlushFileBuffers(hPipe);
     CloseHandle(hPipe);
     return TRUE;
+}
+
+BOOL Magify_IPC_SendPathsToPrimary(int argc, WCHAR **argv) {
+    if (argc <= 1) return FALSE;
+    return Magify_IPC_SendFileList((const WCHAR**)(argv + 1), argc - 1);
 }
 
 static unsigned __stdcall IPC_ServerWorker(void *arg) {

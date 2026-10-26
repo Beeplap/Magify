@@ -2,12 +2,12 @@ CC ?= gcc
 WINDRES ?= windres
 
 CFLAGS = -std=c11 -O3 -Wall -Wextra -municode -mwindows -Iinclude -Ithird_party
-LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
+LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -luuid -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
 
-SRCS = src/main.c src/ipc.c src/registry.c src/ui_overlay.c \
+SRCS = src/main.c src/ipc.c src/registry.c src/com_extension.c src/ui_overlay.c \
        src/ops_common.c src/ops_image.c src/ops_pdf.c
 
-OBJS = build/main.o build/ipc.o build/registry.o build/ui_overlay.o \
+OBJS = build/main.o build/ipc.o build/registry.o build/com_extension.o build/ui_overlay.o \
        build/ops_common.o build/ops_image.o build/ops_pdf.o
 
 RES = build/magify_res.o
@@ -37,7 +37,7 @@ uninstall: $(TARGET)
 	$(TARGET) --uninstall
 
 test: $(TARGET)
-	$(CC) -std=c11 -O3 -Wall -Wextra -municode -Iinclude -Ithird_party tests/test_core.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
+	$(CC) -std=c11 -O3 -Wall -Wextra -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
 	build/test_core.exe
 
 .PHONY: all clean install uninstall test

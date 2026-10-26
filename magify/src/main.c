@@ -1,6 +1,7 @@
 #include "magify.h"
 #include "registry.h"
 #include "ipc.h"
+#include "com_extension.h"
 #include "ui_overlay.h"
 #include "ops_common.h"
 #include <stdio.h>
@@ -311,6 +312,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (!argv) return 1;
+
+    // Check for COM LocalServer32 switch
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"-Embedding") == 0 || _wcsicmp(argv[i], L"/Embedding") == 0) {
+            LocalFree(argv);
+            return Magify_RunComServer();
+        }
+    }
 
     // Check CLI Flags
     if (argc >= 2) {
