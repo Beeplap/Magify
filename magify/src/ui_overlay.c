@@ -1,0 +1,1553 @@
+#include "ui_overlay.h"
+#include "ops_common.h"
+#include "ops_image.h"
+#include "ops_pdf.h"
+#include <math.h>
+#include <stdio.h>
+#include <shlwapi.h>
+
+#define MAGIFY_PI 3.14159265358979323846f
+#define TIMER_ANIM_ID 1
+#define TIMER_CARET_ID 2
+#define ANIM_INTERVAL_MS 8 // ~120 fps
+
+typedef struct {
+    WCHAR title[32];
+    WCHAR subtitle[32];
+} SliceDesc;
+
+static MagifyContext *g_overlayCtx = NULL;
+static HDC g_hMemDC = NULL;
+static HBITMAP g_hDIB = NULL;
+static uint32_t *g_pixels = NULL;
+static int g_surfWidth = 0;
+static int g_surfHeight = 0;
+
+// Scratch DC for antialiased text
+static HDC g_hTextDC = NULL;
+static HBITMAP g_hTextDIB = NULL;
+static uint32_t *g_textPixels = NULL;
+static const int TEXT_SCRATCH_W = 320;
+static const int TEXT_SCRATCH_H = 80;
+
+// Smooth hover expansion tracking
+static float g_sliceHover[8] = {0};
+static float g_hubHover = 0.0f;
+
+// Forward declarations
+static void ResizeOverlayWindow(MagifyContext *ctx, int newW, int newH);
+static void InitRenameHUD(MagifyContext *ctx);
+static void InitCropHUD(MagifyContext *ctx);
+
+int Magify_HitTestRadial(float mouseX, float mouseY, float centerX, float centerY,
+                         float innerR, float outerR, int sliceCount, float rotationOffsetDeg) {
+    float dx = mouseX - centerX;
+    float dy = mouseY - centerY;
+    float dist = sqrtf(dx * dx + dy * dy);
+
+    if (dist < innerR) return -1; // Center Hub
+    if (dist > outerR) return -2; // Outside Ring
+
+    float angleDeg = atan2f(dy, dx) * (180.0f / MAGIFY_PI);
+    if (angleDeg < 0.0f) angleDeg += 360.0f;
+
+    angleDeg = fmodf(angleDeg - rotationOffsetDeg + 360.0f, 360.0f);
+    float sliceSpan = 360.0f / (float)sliceCount;
+    int idx = (int)(angleDeg / sliceSpan);
+    if (idx >= sliceCount) idx = sliceCount - 1;
+    return idx;
+}
+
+static inline float ClampFloat(float v, float mn, float mx) {
+    if (v < mn) return mn;
+    if (v > mx) return mx;
+    return v;
+}
+
+static inline uint32_t PremultiplyARGB(uint8_t a, uint8_t r, uint8_t g, uint8_t b) {
+    if (a == 0) return 0;
+    float af = (float)a / 255.0f;
+    uint8_t pr = (uint8_t)((float)r * af);
+    uint8_t pg = (uint8_t)((float)g * af);
+    uint8_t pb = (uint8_t)((float)b * af);
+    return ((uint32_t)a << 24) | ((uint32_t)pr << 16) | ((uint32_t)pg << 8) | (uint32_t)pb;
+}
+
+static inline uint32_t AlphaBlendPremul(uint32_t dst, uint32_t src) {
+    uint8_t sa = (uint8_t)(src >> 24);
+    if (sa == 0) return dst;
+    if (sa == 255) return src;
+
+    float invA = 1.0f - ((float)sa / 255.0f);
+    uint8_t dr = (uint8_t)(dst >> 16);
+    uint8_t dg = (uint8_t)(dst >> 8);
+    uint8_t db = (uint8_t)dst;
+    uint8_t da = (uint8_t)(dst >> 24);
+
+    uint8_t sr = (uint8_t)(src >> 16);
+    uint8_t sg = (uint8_t)(src >> 8);
+    uint8_t sb = (uint8_t)src;
+
+    uint8_t outR = (uint8_t)(sr + (float)dr * invA);
+    uint8_t outG = (uint8_t)(sg + (float)dg * invA);
+    uint8_t outB = (uint8_t)(sb + (float)db * invA);
+    uint8_t outA = (uint8_t)(sa + (float)da * invA);
+
+    return ((uint32_t)outA << 24) | ((uint32_t)outR << 16) | ((uint32_t)outG << 8) | (uint32_t)outB;
+}
+
+static void InitDIB(HDC hdcScreen, int width, int height) {
+    if (g_pixels && g_surfWidth == width && g_surfHeight == height) return;
+
+    if (g_hDIB) { DeleteObject(g_hDIB); g_hDIB = NULL; }
+    if (g_hMemDC) { DeleteDC(g_hMemDC); g_hMemDC = NULL; }
+
+    g_surfWidth = width;
+    g_surfHeight = height;
+    g_hMemDC = CreateCompatibleDC(hdcScreen);
+
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    g_hDIB = CreateDIBSection(g_hMemDC, &bmi, DIB_RGB_COLORS, (void**)&g_pixels, NULL, 0);
+    SelectObject(g_hMemDC, g_hDIB);
+
+    if (!g_hTextDC) {
+        g_hTextDC = CreateCompatibleDC(hdcScreen);
+        BITMAPINFO tbmi = {0};
+        tbmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        tbmi.bmiHeader.biWidth = TEXT_SCRATCH_W;
+        tbmi.bmiHeader.biHeight = -TEXT_SCRATCH_H;
+        tbmi.bmiHeader.biPlanes = 1;
+        tbmi.bmiHeader.biBitCount = 32;
+        tbmi.bmiHeader.biCompression = BI_RGB;
+        g_hTextDIB = CreateDIBSection(g_hTextDC, &tbmi, DIB_RGB_COLORS, (void**)&g_textPixels, NULL, 0);
+        SelectObject(g_hTextDC, g_hTextDIB);
+    }
+}
+
+static void DrawCrispTextARGB(const WCHAR *text, int xCenter, int yCenter,
+                              COLORREF textColor, int fontSize, int fontWeight, float alpha, BOOL leftAlign) {
+    if (!text || text[0] == L'\0' || alpha <= 0.01f || !g_textPixels) return;
+
+    memset(g_textPixels, 0, TEXT_SCRATCH_W * TEXT_SCRATCH_H * sizeof(uint32_t));
+
+    HFONT hFont = CreateFontW(
+        -fontSize, 0, 0, 0, fontWeight, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI"
+    );
+    HGDIOBJ hOldFont = SelectObject(g_hTextDC, hFont);
+
+    RECT rc = { 0, 0, TEXT_SCRATCH_W, TEXT_SCRATCH_H };
+    SetBkMode(g_hTextDC, TRANSPARENT);
+    SetTextColor(g_hTextDC, RGB(255, 255, 255));
+    UINT format = (leftAlign ? DT_LEFT : DT_CENTER) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
+    DrawTextW(g_hTextDC, text, -1, &rc, format);
+
+    SelectObject(g_hTextDC, hOldFont);
+    DeleteObject(hFont);
+
+    int dstStartX = leftAlign ? xCenter : (xCenter - (TEXT_SCRATCH_W / 2));
+    int dstStartY = yCenter - (TEXT_SCRATCH_H / 2);
+
+    uint8_t cr = GetRValue(textColor);
+    uint8_t cg = GetGValue(textColor);
+    uint8_t cb = GetBValue(textColor);
+
+    for (int sy = 0; sy < TEXT_SCRATCH_H; sy++) {
+        int dy = dstStartY + sy;
+        if (dy < 0 || dy >= g_surfHeight) continue;
+
+        for (int sx = 0; sx < TEXT_SCRATCH_W; sx++) {
+            int dx = dstStartX + sx;
+            if (dx < 0 || dx >= g_surfWidth) continue;
+
+            uint32_t srcVal = g_textPixels[sy * TEXT_SCRATCH_W + sx];
+            uint8_t gray = (uint8_t)(srcVal & 0xFF);
+            if (gray == 0) continue;
+
+            float factor = ((float)gray / 255.0f) * alpha;
+            uint8_t outA = (uint8_t)(255.0f * factor);
+            uint8_t outR = (uint8_t)((float)cr * factor);
+            uint8_t outG = (uint8_t)((float)cg * factor);
+            uint8_t outB = (uint8_t)((float)cb * factor);
+
+            uint32_t srcPremul = ((uint32_t)outA << 24) | ((uint32_t)outR << 16) | ((uint32_t)outG << 8) | (uint32_t)outB;
+            int idx = dy * g_surfWidth + dx;
+            g_pixels[idx] = AlphaBlendPremul(g_pixels[idx], srcPremul);
+        }
+    }
+}
+
+static void DrawRoundedBoxARGB(int x, int y, int w, int h, float radius,
+                               uint8_t bgR, uint8_t bgG, uint8_t bgB, uint8_t bgA,
+                               uint8_t bdrR, uint8_t bdrG, uint8_t bdrB, uint8_t bdrA, float bdrWidth) {
+    float x0 = (float)x, y0 = (float)y;
+    float x1 = (float)(x + w), y1 = (float)(y + h);
+
+    int minY = (y < 0) ? 0 : y;
+    int maxY = (y + h >= g_surfHeight) ? g_surfHeight - 1 : y + h;
+    int minX = (x < 0) ? 0 : x;
+    int maxX = (x + w >= g_surfWidth) ? g_surfWidth - 1 : x + w;
+
+    for (int py = minY; py <= maxY; py++) {
+        float dy = 0.0f;
+        if ((float)py < y0 + radius) dy = (y0 + radius) - (float)py;
+        else if ((float)py > y1 - radius) dy = (float)py - (y1 - radius);
+
+        for (int px = minX; px <= maxX; px++) {
+            float dx = 0.0f;
+            if ((float)px < x0 + radius) dx = (x0 + radius) - (float)px;
+            else if ((float)px > x1 - radius) dx = (float)px - (x1 - radius);
+
+            float dist = sqrtf(dx * dx + dy * dy);
+            if (dist > radius + 0.5f) continue;
+
+            float innerDist = radius - dist;
+            float cov = ClampFloat(innerDist + 0.5f, 0.0f, 1.0f);
+
+            int pIdx = py * g_surfWidth + px;
+            if (innerDist < bdrWidth) {
+                float bCov = ClampFloat((bdrWidth - innerDist) + 0.5f, 0.0f, 1.0f) * cov;
+                uint8_t a = (uint8_t)((float)bdrA * bCov);
+                g_pixels[pIdx] = AlphaBlendPremul(g_pixels[pIdx], PremultiplyARGB(a, bdrR, bdrG, bdrB));
+            } else {
+                uint8_t a = (uint8_t)((float)bgA * cov);
+                g_pixels[pIdx] = AlphaBlendPremul(g_pixels[pIdx], PremultiplyARGB(a, bgR, bgG, bgB));
+            }
+        }
+    }
+}
+
+static int GetSubmenuSliceCount(MagifyContext *ctx) {
+    if (ctx->activeSubmenu == SUBMENU_CONVERT) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) return 5; // PNG, JPG, BMP, ICO, PDF
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 3;
+        return 2;
+    }
+    if (ctx->activeSubmenu == SUBMENU_EDIT) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) return 5; // Rotate CW, CCW, Flip H, Resize, Crop
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 4;
+        return 2;
+    }
+    if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) return 4; // Lossless, 80%, 60%, <200KB
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 3;
+        return 1;
+    }
+    return 4;
+}
+
+static void GetSubmenuSlices(MagifyContext *ctx, SliceDesc *descs, int maxCount) {
+    for (int i = 0; i < maxCount; i++) {
+        descs[i].title[0] = L'\0';
+        descs[i].subtitle[0] = L'\0';
+    }
+
+    if (ctx->activeSubmenu == SUBMENU_CONVERT) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+            wcscpy(descs[0].title, L"PNG");   wcscpy(descs[0].subtitle, L"Lossless");
+            wcscpy(descs[1].title, L"JPG");   wcscpy(descs[1].subtitle, L"Compact 92%");
+            wcscpy(descs[2].title, L"BMP");   wcscpy(descs[2].subtitle, L"Raw 24-bit");
+            wcscpy(descs[3].title, L"ICO");   wcscpy(descs[3].subtitle, L"Multi-Size");
+            wcscpy(descs[4].title, L"PDF");   wcscpy(descs[4].subtitle, L"Document");
+        } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+            wcscpy(descs[0].title, L"JPG Pages"); wcscpy(descs[0].subtitle, L"Export");
+            wcscpy(descs[1].title, L"PNG Pages"); wcscpy(descs[1].subtitle, L"300 DPI");
+            wcscpy(descs[2].title, L"Extract");   wcscpy(descs[2].subtitle, L"Plain Text");
+        } else {
+            wcscpy(descs[0].title, L"ZIP");    wcscpy(descs[0].subtitle, L"Archive");
+            wcscpy(descs[1].title, L"Cancel"); wcscpy(descs[1].subtitle, L"Return");
+        }
+    } else if (ctx->activeSubmenu == SUBMENU_EDIT) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+            wcscpy(descs[0].title, L"Rotate 90°");  wcscpy(descs[0].subtitle, L"Clockwise");
+            wcscpy(descs[1].title, L"Rotate -90°"); wcscpy(descs[1].subtitle, L"Counter-CW");
+            wcscpy(descs[2].title, L"Flip H");      wcscpy(descs[2].subtitle, L"Mirror");
+            wcscpy(descs[3].title, L"Resize");      wcscpy(descs[3].subtitle, L"50% / 1080p");
+            wcscpy(descs[4].title, L"Crop");        wcscpy(descs[4].subtitle, L"Aspect HUD");
+        } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+            wcscpy(descs[0].title, L"Rotate All"); wcscpy(descs[0].subtitle, L"90° CW");
+            wcscpy(descs[1].title, L"Split");      wcscpy(descs[1].subtitle, L"Pages");
+            wcscpy(descs[2].title, L"Merge");      wcscpy(descs[2].subtitle, L"Append");
+            wcscpy(descs[3].title, L"Organize");   wcscpy(descs[3].subtitle, L"Thumbnails");
+        }
+    } else if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
+        if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+            wcscpy(descs[0].title, L"Lossless");  wcscpy(descs[0].subtitle, L"Deflate Q90");
+            wcscpy(descs[1].title, L"Balanced");  wcscpy(descs[1].subtitle, L"80% Quality");
+            wcscpy(descs[2].title, L"Maximum");   wcscpy(descs[2].subtitle, L"60% Web");
+            wcscpy(descs[3].title, L"< 200 KB");  wcscpy(descs[3].subtitle, L"Portal Fit");
+        } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+            wcscpy(descs[0].title, L"Print");     wcscpy(descs[0].subtitle, L"300 DPI");
+            wcscpy(descs[1].title, L"Balanced");  wcscpy(descs[1].subtitle, L"150 DPI");
+            wcscpy(descs[2].title, L"Extreme");   wcscpy(descs[2].subtitle, L"96 DPI");
+        } else {
+            wcscpy(descs[0].title, L"Zip Deflate"); wcscpy(descs[0].subtitle, L"Standard");
+        }
+    }
+}
+
+// -------------------------------------------------------------
+// Rename HUD Implementation
+// -------------------------------------------------------------
+static void InitRenameHUD(MagifyContext *ctx) {
+    ctx->uiState = UI_STATE_RENAME_HUD;
+    const WCHAR *file = (ctx->fileCount > 0) ? ctx->files[0] : L"document.txt";
+    const WCHAR *fName = PathFindFileNameW(file);
+    const WCHAR *ext = PathFindExtensionW(file);
+
+    wcsncpy(ctx->renameExt, ext, 31);
+    ctx->renameExt[31] = L'\0';
+
+    wcsncpy(ctx->renameBuf, fName, MAX_PATH - 1);
+    ctx->renameBuf[MAX_PATH - 1] = L'\0';
+    PathRemoveExtensionW(ctx->renameBuf);
+
+    ctx->renameCursor = (int)wcslen(ctx->renameBuf);
+    ctx->renameSelStart = 0;
+    ctx->renameSelEnd = ctx->renameCursor;
+    ctx->renameCaretVisible = TRUE;
+}
+
+static void RenderRenameHUD(MagifyContext *ctx) {
+    float cx = (float)g_surfWidth * 0.5f;
+    float cy = (float)g_surfHeight * 0.5f;
+
+    int pillW = 410;
+    int pillH = 124;
+    int px = (int)(cx - (float)pillW * 0.5f);
+    int py = (int)(cy - (float)pillH * 0.5f);
+
+    // Dark-glass container pill
+    DrawRoundedBoxARGB(px, py, pillW, pillH, 18.0f,
+                       18, 19, 26, 242,   // Obsidian Glass #12131A
+                       124, 58, 237, 220, // Electric Violet #7C3AED
+                       1.5f);
+
+    // Header label & hints
+    DrawCrispTextARGB(L"RENAME FILE", px + 22, py + 16, RGB(34, 211, 238), 11, FW_BOLD, 1.0f, TRUE);
+    DrawCrispTextARGB(L"Enter to apply • Esc to cancel", px + pillW - 170, py + 16, RGB(148, 163, 184), 9, FW_NORMAL, 1.0f, TRUE);
+
+    // Inner text input box
+    int bx = px + 18;
+    int by = py + 36;
+    int bw = pillW - 36;
+    int bh = 38;
+
+    DrawRoundedBoxARGB(bx, by, bw, bh, 8.0f,
+                       28, 32, 46, 255,   // Dark input surface #1C202E
+                       51, 65, 85, 200,   // Slate border
+                       1.0f);
+
+    // Text & caret rendering
+    int textStartX = bx + 12;
+    int textY = by + 19;
+
+    // Selection highlight
+    BOOL hasSel = (ctx->renameSelStart != ctx->renameSelEnd);
+    if (hasSel) {
+        int selW = (int)wcslen(ctx->renameBuf) * 8 + 4;
+        if (selW > bw - 70) selW = bw - 70;
+        DrawRoundedBoxARGB(textStartX - 2, by + 8, selW, 22, 4.0f,
+                           124, 58, 237, 180, 124, 58, 237, 255, 1.0f);
+    }
+
+    COLORREF txtCol = hasSel ? RGB(255, 255, 255) : RGB(248, 250, 252);
+    DrawCrispTextARGB(ctx->renameBuf, textStartX, textY, txtCol, 12, FW_SEMIBOLD, 1.0f, TRUE);
+
+    // Caret cursor
+    if (ctx->renameCaretVisible && !hasSel) {
+        int caretX = textStartX + ctx->renameCursor * 8;
+        if (caretX > bx + bw - 70) caretX = bx + bw - 70;
+        for (int y = by + 9; y <= by + 28; y++) {
+            if (y >= 0 && y < g_surfHeight && caretX >= 0 && caretX < g_surfWidth) {
+                g_pixels[y * g_surfWidth + caretX] = PremultiplyARGB(255, 34, 211, 238);
+                g_pixels[y * g_surfWidth + caretX + 1] = PremultiplyARGB(255, 34, 211, 238);
+            }
+        }
+    }
+
+    // Locked extension badge
+    int badgeW = 54;
+    int badgeH = 26;
+    int badgeX = bx + bw - badgeW - 6;
+    int badgeY = by + 6;
+    DrawRoundedBoxARGB(badgeX, badgeY, badgeW, badgeH, 6.0f,
+                       22, 78, 99, 230,   // #164E63
+                       6, 182, 212, 200,  // #06B6D4
+                       1.0f);
+    DrawCrispTextARGB(ctx->renameExt, badgeX + (badgeW / 2), badgeY + 13, RGB(34, 211, 238), 10, FW_BOLD, 1.0f, FALSE);
+
+    // Apply button
+    int btnW = 100, btnH = 28;
+    int btnX = px + pillW - btnW - 18;
+    int btnY = py + 84;
+    DrawRoundedBoxARGB(btnX, btnY, btnW, btnH, 8.0f,
+                       16, 185, 129, 240, // Emerald #10B981
+                       5, 150, 105, 255,
+                       1.0f);
+    DrawCrispTextARGB(L"Rename", btnX + (btnW / 2), btnY + 14, RGB(255, 255, 255), 11, FW_BOLD, 1.0f, FALSE);
+
+    // Cancel button
+    int cBtnW = 75;
+    int cBtnX = btnX - cBtnW - 10;
+    DrawRoundedBoxARGB(cBtnX, btnY, cBtnW, btnH, 8.0f,
+                       30, 41, 59, 200,   // Slate #1E293B
+                       71, 85, 105, 180,
+                       1.0f);
+    DrawCrispTextARGB(L"Cancel", cBtnX + (cBtnW / 2), btnY + 14, RGB(148, 163, 184), 10, FW_SEMIBOLD, 1.0f, FALSE);
+}
+
+// -------------------------------------------------------------
+// Interactive Crop HUD Implementation
+// -------------------------------------------------------------
+static void InitCropHUD(MagifyContext *ctx) {
+    ctx->uiState = UI_STATE_IMAGE_EDIT;
+    ctx->cropAspectLock = 0; // Free
+    ctx->cropDragMode = -1;
+    ctx->cropNormX = 0.10f;
+    ctx->cropNormY = 0.10f;
+    ctx->cropNormW = 0.80f;
+    ctx->cropNormH = 0.80f;
+
+    Magify_LoadImageDimensions(ctx->files[0], &ctx->cropOrigW, &ctx->cropOrigH);
+    if (ctx->cropOrigW <= 0) ctx->cropOrigW = 1920;
+    if (ctx->cropOrigH <= 0) ctx->cropOrigH = 1080;
+
+    ResizeOverlayWindow(ctx, 680, 560);
+
+    // Generate thumbnail preview
+    int maxW = (int)(600 * ctx->dpiScale);
+    int maxH = (int)(400 * ctx->dpiScale);
+    if (ctx->cropPreviewPixels) free(ctx->cropPreviewPixels);
+    ctx->cropPreviewPixels = (uint32_t*)malloc(maxW * maxH * sizeof(uint32_t));
+
+    Magify_GeneratePreview(ctx->files[0], maxW, maxH,
+                           ctx->cropPreviewPixels,
+                           &ctx->cropPreviewW, &ctx->cropPreviewH);
+}
+
+static void RenderCropHUD(MagifyContext *ctx) {
+    // 1. Dark-glass container frame
+    DrawRoundedBoxARGB(10, 10, g_surfWidth - 20, g_surfHeight - 20, 18.0f,
+                       18, 19, 26, 245,   // #12131A
+                       124, 58, 237, 200, // Violet border
+                       1.5f);
+
+    // 2. Header
+    DrawCrispTextARGB(L"INTERACTIVE CROP & ASPECT RATIO", g_surfWidth / 2, 28, RGB(34, 211, 238), 12, FW_BOLD, 1.0f, FALSE);
+
+    int curCropPxW = (int)(ctx->cropNormW * (float)ctx->cropOrigW);
+    int curCropPxH = (int)(ctx->cropNormH * (float)ctx->cropOrigH);
+    WCHAR dimStr[64];
+    swprintf(dimStr, 64, L"Orig: %dx%d px  ->  Crop: %dx%d px", ctx->cropOrigW, ctx->cropOrigH, curCropPxW, curCropPxH);
+    DrawCrispTextARGB(dimStr, g_surfWidth / 2, 46, RGB(248, 250, 252), 10, FW_NORMAL, 1.0f, FALSE);
+
+    // 3. Central Viewport & Preview Image
+    int vpX = (g_surfWidth - ctx->cropPreviewW) / 2;
+    int vpY = 62 + (400 - ctx->cropPreviewH) / 2;
+    int vpW = ctx->cropPreviewW;
+    int vpH = ctx->cropPreviewH;
+
+    // Blit preview image pixels
+    if (ctx->cropPreviewPixels && vpW > 0 && vpH > 0) {
+        for (int y = 0; y < vpH; y++) {
+            int dy = vpY + y;
+            if (dy < 0 || dy >= g_surfHeight) continue;
+            for (int x = 0; x < vpW; x++) {
+                int dx = vpX + x;
+                if (dx < 0 || dx >= g_surfWidth) continue;
+                uint32_t p = ctx->cropPreviewPixels[y * vpW + x];
+                g_pixels[dy * g_surfWidth + dx] = p;
+            }
+        }
+    }
+
+    // 4. Crop Box Screen Coordinates
+    int scX = vpX + (int)(ctx->cropNormX * (float)vpW);
+    int scY = vpY + (int)(ctx->cropNormY * (float)vpH);
+    int scW = (int)(ctx->cropNormW * (float)vpW);
+    int scH = (int)(ctx->cropNormH * (float)vpH);
+    if (scW < 10) scW = 10;
+    if (scH < 10) scH = 10;
+
+    // Darkened outside mask (65% black alpha over areas outside crop rect in viewport)
+    for (int y = 0; y < vpH; y++) {
+        int dy = vpY + y;
+        if (dy < 0 || dy >= g_surfHeight) continue;
+        for (int x = 0; x < vpW; x++) {
+            int dx = vpX + x;
+            if (dx < 0 || dx >= g_surfWidth) continue;
+
+            if (dx < scX || dx >= scX + scW || dy < scY || dy >= scY + scH) {
+                int idx = dy * g_surfWidth + dx;
+                uint32_t p = g_pixels[idx];
+                uint8_t a = (uint8_t)(p >> 24);
+                uint8_t r = (uint8_t)((p >> 16) * 0.35f);
+                uint8_t g = (uint8_t)((p >> 8) * 0.35f);
+                uint8_t b = (uint8_t)((p) * 0.35f);
+                g_pixels[idx] = ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            }
+        }
+    }
+
+    // Cyan crop border
+    for (int x = scX; x <= scX + scW; x++) {
+        if (x >= 0 && x < g_surfWidth) {
+            if (scY >= 0 && scY < g_surfHeight) {
+                g_pixels[scY * g_surfWidth + x] = PremultiplyARGB(255, 34, 211, 238);
+                if (scY + 1 < g_surfHeight) g_pixels[(scY + 1) * g_surfWidth + x] = PremultiplyARGB(255, 34, 211, 238);
+            }
+            int by = scY + scH;
+            if (by >= 0 && by < g_surfHeight) {
+                g_pixels[by * g_surfWidth + x] = PremultiplyARGB(255, 34, 211, 238);
+                if (by - 1 >= 0) g_pixels[(by - 1) * g_surfWidth + x] = PremultiplyARGB(255, 34, 211, 238);
+            }
+        }
+    }
+    for (int y = scY; y <= scY + scH; y++) {
+        if (y >= 0 && y < g_surfHeight) {
+            if (scX >= 0 && scX < g_surfWidth) {
+                g_pixels[y * g_surfWidth + scX] = PremultiplyARGB(255, 34, 211, 238);
+                if (scX + 1 < g_surfWidth) g_pixels[y * g_surfWidth + scX + 1] = PremultiplyARGB(255, 34, 211, 238);
+            }
+            int rx = scX + scW;
+            if (rx >= 0 && rx < g_surfWidth) {
+                g_pixels[y * g_surfWidth + rx] = PremultiplyARGB(255, 34, 211, 238);
+                if (rx - 1 >= 0) g_pixels[y * g_surfWidth + rx - 1] = PremultiplyARGB(255, 34, 211, 238);
+            }
+        }
+    }
+
+    // Rule of thirds grid lines
+    int v1 = scX + scW / 3;
+    int v2 = scX + (scW * 2) / 3;
+    int h1 = scY + scH / 3;
+    int h2 = scY + (scH * 2) / 3;
+    for (int y = scY; y <= scY + scH; y++) {
+        if (y >= 0 && y < g_surfHeight) {
+            if (v1 >= 0 && v1 < g_surfWidth) g_pixels[y * g_surfWidth + v1] = AlphaBlendPremul(g_pixels[y * g_surfWidth + v1], PremultiplyARGB(120, 34, 211, 238));
+            if (v2 >= 0 && v2 < g_surfWidth) g_pixels[y * g_surfWidth + v2] = AlphaBlendPremul(g_pixels[y * g_surfWidth + v2], PremultiplyARGB(120, 34, 211, 238));
+        }
+    }
+    for (int x = scX; x <= scX + scW; x++) {
+        if (x >= 0 && x < g_surfWidth) {
+            if (h1 >= 0 && h1 < g_surfHeight) g_pixels[h1 * g_surfWidth + x] = AlphaBlendPremul(g_pixels[h1 * g_surfWidth + x], PremultiplyARGB(120, 34, 211, 238));
+            if (h2 >= 0 && h2 < g_surfHeight) g_pixels[h2 * g_surfWidth + x] = AlphaBlendPremul(g_pixels[h2 * g_surfWidth + x], PremultiplyARGB(120, 34, 211, 238));
+        }
+    }
+
+    // 8 Draggable Corner & Edge Handle Grips
+    int hPts[8][2] = {
+        { scX, scY },                     // 0: Top-Left
+        { scX + scW, scY },               // 1: Top-Right
+        { scX + scW, scY + scH },         // 2: Bottom-Right
+        { scX, scY + scH },               // 3: Bottom-Left
+        { scX + scW / 2, scY },           // 4: Top-Mid
+        { scX + scW, scY + scH / 2 },     // 5: Right-Mid
+        { scX + scW / 2, scY + scH },     // 6: Bottom-Mid
+        { scX, scY + scH / 2 }            // 7: Left-Mid
+    };
+    for (int i = 0; i < 8; i++) {
+        DrawRoundedBoxARGB(hPts[i][0] - 5, hPts[i][1] - 5, 10, 10, 5.0f,
+                           255, 255, 255, 255,
+                           6, 182, 212, 255, 1.5f);
+    }
+
+    // 5. Bottom Toolbar
+    int barY = g_surfHeight - 75;
+    DrawRoundedBoxARGB(30, barY, g_surfWidth - 60, 48, 10.0f,
+                       24, 27, 38, 230,
+                       51, 65, 85, 160, 1.0f);
+
+    const WCHAR *aspectLabels[] = { L"Free", L"1:1", L"4:3", L"16:9", L"35:45" };
+    int ax = 42;
+    for (int i = 0; i < 5; i++) {
+        int bw = (i == 4) ? 58 : 50;
+        BOOL isActive = (ctx->cropAspectLock == i);
+        uint8_t bgR = isActive ? 124 : 30;
+        uint8_t bgG = isActive ? 58  : 41;
+        uint8_t bgB = isActive ? 237 : 59;
+        COLORREF tCol = isActive ? RGB(255, 255, 255) : RGB(148, 163, 184);
+
+        DrawRoundedBoxARGB(ax, barY + 10, bw, 28, 6.0f, bgR, bgG, bgB, 240, 51, 65, 85, 180, 1.0f);
+        DrawCrispTextARGB(aspectLabels[i], ax + (bw / 2), barY + 24, tCol, 10, FW_BOLD, 1.0f, FALSE);
+        ax += bw + 8;
+    }
+
+    // Rotate 90° button
+    DrawRoundedBoxARGB(365, barY + 10, 80, 28, 6.0f, 30, 41, 59, 240, 51, 65, 85, 180, 1.0f);
+    DrawCrispTextARGB(L"Rotate 90°", 365 + 40, barY + 24, RGB(220, 240, 255), 10, FW_NORMAL, 1.0f, FALSE);
+
+    // Cancel button
+    DrawRoundedBoxARGB(455, barY + 10, 75, 28, 6.0f, 30, 41, 59, 240, 51, 65, 85, 180, 1.0f);
+    DrawCrispTextARGB(L"Cancel", 455 + 37, barY + 24, RGB(148, 163, 184), 10, FW_NORMAL, 1.0f, FALSE);
+
+    // Apply Crop button (Emerald #10B981)
+    DrawRoundedBoxARGB(540, barY + 10, 95, 28, 6.0f, 16, 185, 129, 255, 5, 150, 105, 255, 1.0f);
+    DrawCrispTextARGB(L"Apply Crop", 540 + 47, barY + 24, RGB(255, 255, 255), 10, FW_BOLD, 1.0f, FALSE);
+}
+
+// -------------------------------------------------------------
+// Radial Menu Renderer
+// -------------------------------------------------------------
+static void RenderRadialMenu(MagifyContext *ctx) {
+    float cx = (float)g_surfWidth * 0.5f;
+    float cy = (float)g_surfHeight * 0.5f;
+
+    float t = ctx->animProgress;
+    float animScale = 1.0f;
+    if (t < 1.0f) {
+        float c1 = 1.70158f;
+        float c3 = c1 + 1.0f;
+        float p = t - 1.0f;
+        animScale = 1.0f + c3 * (p * p * p) + c1 * (p * p);
+        if (animScale < 0.05f) animScale = 0.05f;
+    }
+
+    if (ctx->isClosing) {
+        float cp = 1.0f - ctx->closeProgress;
+        animScale *= cp;
+        if (animScale < 0.01f) animScale = 0.01f;
+    }
+
+    float globalAlpha = ctx->isClosing ? (1.0f - ctx->closeProgress) : ClampFloat(t * 1.5f, 0.0f, 1.0f);
+    if (globalAlpha <= 0.001f) return;
+
+    float hubRadius = 50.0f * animScale;
+    float innerRadius = 56.0f * animScale;
+    float baseOuterRadius = 142.0f * animScale;
+
+    int sliceCount = 4;
+    float rotOffset = 225.0f;
+    if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+        sliceCount = GetSubmenuSliceCount(ctx);
+        rotOffset = 270.0f - (360.0f / (float)sliceCount) * 0.5f;
+    }
+
+    float sliceSpan = 360.0f / (float)sliceCount;
+
+    for (int i = 0; i < sliceCount; i++) {
+        float target = (ctx->hoveredSlice == i) ? 1.0f : 0.0f;
+        g_sliceHover[i] += (target - g_sliceHover[i]) * 0.28f;
+    }
+    float hubTarget = (ctx->hoveredSlice == -1) ? 1.0f : 0.0f;
+    g_hubHover += (hubTarget - g_hubHover) * 0.28f;
+
+    for (int y = 0; y < g_surfHeight; y++) {
+        float dy = (float)y - cy;
+        for (int x = 0; x < g_surfWidth; x++) {
+            float dx = (float)x - cx;
+            float dist = sqrtf(dx * dx + dy * dy);
+
+            if (dist > (baseOuterRadius + 18.0f) + 2.0f) continue;
+
+            // Center Hub
+            if (dist <= hubRadius + 1.5f) {
+                float d = hubRadius - dist;
+                float cov = ClampFloat(d + 0.5f, 0.0f, 1.0f);
+                uint8_t r = 18, g = 19, b = 26;
+                uint8_t a = (uint8_t)(235.0f * cov * globalAlpha);
+
+                if (g_hubHover > 0.01f) {
+                    r = (uint8_t)(r + (34 - r) * g_hubHover);
+                    g = (uint8_t)(g + (45 - g) * g_hubHover);
+                    b = (uint8_t)(b + (70 - b) * g_hubHover);
+                }
+
+                float borderDist = fabsf(dist - hubRadius);
+                if (borderDist < 2.5f) {
+                    float bFactor = (1.0f - (borderDist / 2.5f)) * globalAlpha;
+                    uint8_t br = (uint8_t)((124.0f + 50.0f * g_hubHover) * bFactor);
+                    uint8_t bg = (uint8_t)((58.0f + 150.0f * g_hubHover) * bFactor);
+                    uint8_t bb = (uint8_t)(237.0f * bFactor);
+                    g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, br, bg, bb);
+                    continue;
+                }
+
+                g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, r, g, b);
+                continue;
+            }
+
+            // Radial Slices
+            if (dist >= innerRadius - 1.5f) {
+                float angleDeg = atan2f(dy, dx) * (180.0f / MAGIFY_PI);
+                if (angleDeg < 0.0f) angleDeg += 360.0f;
+
+                float relAngle = fmodf(angleDeg - rotOffset + 360.0f, 360.0f);
+                int sIdx = (int)(relAngle / sliceSpan);
+                if (sIdx >= sliceCount) sIdx = sliceCount - 1;
+
+                float sliceLocalAngle = relAngle - ((float)sIdx * sliceSpan);
+                float halfSpan = sliceSpan * 0.5f;
+                float angleFromCenter = fabsf(sliceLocalAngle - halfSpan);
+
+                float gapDeg = 1.4f;
+                float angDist = (halfSpan - angleFromCenter) - gapDeg;
+                float angPixDist = angDist * (MAGIFY_PI / 180.0f) * dist;
+
+                float hAmount = g_sliceHover[sIdx];
+                float outerR = baseOuterRadius + (12.0f * hAmount * animScale);
+
+                float dInner = dist - innerRadius;
+                float dOuter = outerR - dist;
+                float radDist = (dInner < dOuter) ? dInner : dOuter;
+                float sdfDist = (radDist < angPixDist) ? radDist : angPixDist;
+
+                if (sdfDist < -1.0f) continue;
+                float cov = ClampFloat(sdfDist + 0.5f, 0.0f, 1.0f);
+
+                float radFactor = (dist - innerRadius) / (outerR - innerRadius);
+                radFactor = ClampFloat(radFactor, 0.0f, 1.0f);
+
+                uint8_t normR = 24, normG = 27, normB = 38;
+                uint8_t normA = (uint8_t)(228.0f * cov * globalAlpha);
+
+                uint8_t hovR = (uint8_t)(124.0f + (6.0f - 124.0f) * radFactor);
+                uint8_t hovG = (uint8_t)(58.0f + (182.0f - 58.0f) * radFactor);
+                uint8_t hovB = (uint8_t)(237.0f + (212.0f - 237.0f) * radFactor);
+                uint8_t hovA = (uint8_t)(245.0f * cov * globalAlpha);
+
+                uint8_t r = (uint8_t)(normR + ((float)hovR - normR) * hAmount);
+                uint8_t g = (uint8_t)(normG + ((float)hovG - normG) * hAmount);
+                uint8_t b = (uint8_t)(normB + ((float)hovB - normB) * hAmount);
+                uint8_t a = (uint8_t)(normA + ((float)hovA - normA) * hAmount);
+
+                if (hAmount > 0.1f && dOuter < 3.0f && dOuter >= -0.5f) {
+                    float edgeGlow = (1.0f - (dOuter / 3.0f)) * hAmount * globalAlpha;
+                    r = (uint8_t)(r + (34 - r) * edgeGlow);
+                    g = (uint8_t)(g + (211 - g) * edgeGlow);
+                    b = (uint8_t)(b + (238 - b) * edgeGlow);
+                }
+
+                g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, r, g, b);
+            }
+        }
+    }
+
+    // Center Hub Text
+    if (ctx->uiState == UI_STATE_PROCESSING) {
+        WCHAR progStr[32];
+        swprintf(progStr, 32, L"%d%%", (int)ctx->jobProgress);
+        DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, RGB(34, 211, 238), 20, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(ctx->statusText, (int)cx, (int)cy + 14, RGB(148, 163, 184), 10, FW_NORMAL, globalAlpha, FALSE);
+    } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+        DrawCrispTextARGB(L"← BACK", (int)cx, (int)cy - 6, RGB(34, 211, 238), 14, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(L"Click to return", (int)cx, (int)cy + 12, RGB(148, 163, 184), 9, FW_NORMAL, globalAlpha, FALSE);
+    } else {
+        WCHAR badge[32] = {0};
+        if (ctx->fileCount > 1) {
+            swprintf(badge, 32, L"%d FILES", ctx->fileCount);
+        } else if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+            wcscpy(badge, L"IMAGE");
+        } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+            wcscpy(badge, L"PDF");
+        } else {
+            wcscpy(badge, L"FILE");
+        }
+        DrawCrispTextARGB(badge, (int)cx, (int)cy - 16, RGB(34, 211, 238), 12, FW_BOLD, globalAlpha, FALSE);
+
+        WCHAR nameDisplay[32] = {0};
+        if (ctx->fileCount == 1 && ctx->files[0][0] != L'\0') {
+            const WCHAR *fName = PathFindFileNameW(ctx->files[0]);
+            wcsncpy(nameDisplay, fName, 14);
+            nameDisplay[14] = L'\0';
+            if (wcslen(fName) > 14) wcscat(nameDisplay, L"...");
+        } else {
+            wcscpy(nameDisplay, L"Magify");
+        }
+        DrawCrispTextARGB(nameDisplay, (int)cx, (int)cy, RGB(248, 250, 252), 11, FW_SEMIBOLD, globalAlpha, FALSE);
+
+        WCHAR sizeStr[32] = {0};
+        Magify_FormatFileSize(ctx->totalSizeBytes, sizeStr, 32);
+        DrawCrispTextARGB(sizeStr, (int)cx, (int)cy + 15, RGB(148, 163, 184), 10, FW_NORMAL, globalAlpha, FALSE);
+    }
+
+    // Slice Labels
+    SliceDesc descs[8];
+    if (ctx->uiState == UI_STATE_RADIAL_ROOT) {
+        wcscpy(descs[0].title, L"CONVERT");   wcscpy(descs[0].subtitle, L"Target Format");
+        wcscpy(descs[1].title, L"EDIT");      wcscpy(descs[1].subtitle, L"Tools & Actions");
+        wcscpy(descs[2].title, L"COMPRESS");  wcscpy(descs[2].subtitle, L"Optimize Size");
+        wcscpy(descs[3].title, L"RENAME");    wcscpy(descs[3].subtitle, L"Instant HUD");
+    } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+        GetSubmenuSlices(ctx, descs, 8);
+    }
+
+    float labelR = (innerRadius + baseOuterRadius) * 0.5f;
+    for (int i = 0; i < sliceCount; i++) {
+        if (descs[i].title[0] == L'\0') continue;
+
+        float midAngle = rotOffset + ((float)i + 0.5f) * sliceSpan;
+        float rad = midAngle * (MAGIFY_PI / 180.0f);
+        float hAmount = g_sliceHover[i];
+        float curLabelR = labelR + (4.0f * hAmount);
+
+        int lx = (int)(cx + cosf(rad) * curLabelR);
+        int ly = (int)(cy + sinf(rad) * curLabelR);
+
+        COLORREF titleColor = (hAmount > 0.5f) ? RGB(255, 255, 255) : RGB(248, 250, 252);
+        COLORREF subColor = (hAmount > 0.5f) ? RGB(220, 245, 255) : RGB(148, 163, 184);
+
+        int titleFont = (sliceCount <= 4) ? 12 : 11;
+        int subFont = (sliceCount <= 4) ? 9 : 8;
+
+        DrawCrispTextARGB(descs[i].title, lx, ly - 7, titleColor, titleFont, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(descs[i].subtitle, lx, ly + 8, subColor, subFont, FW_NORMAL, globalAlpha, FALSE);
+    }
+}
+
+static void RenderFrame(MagifyContext *ctx) {
+    if (!g_pixels || g_surfWidth == 0 || g_surfHeight == 0) return;
+    memset(g_pixels, 0, g_surfWidth * g_surfHeight * sizeof(uint32_t));
+
+    if (ctx->uiState == UI_STATE_RENAME_HUD) {
+        RenderRenameHUD(ctx);
+    } else if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
+        RenderCropHUD(ctx);
+    } else {
+        RenderRadialMenu(ctx);
+    }
+
+    POINT ptSrc = {0, 0};
+    SIZE sz = { g_surfWidth, g_surfHeight };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+
+    RECT rcWin;
+    GetWindowRect(ctx->hwndOverlay, &rcWin);
+    POINT ptDst = { rcWin.left, rcWin.top };
+
+    UpdateLayeredWindow(
+        ctx->hwndOverlay,
+        NULL,
+        &ptDst,
+        &sz,
+        g_hMemDC,
+        &ptSrc,
+        0,
+        &bf,
+        ULW_ALPHA
+    );
+}
+
+static void ResizeOverlayWindow(MagifyContext *ctx, int newW, int newH) {
+    ctx->overlayWidth = (int)((float)newW * ctx->dpiScale);
+    ctx->overlayHeight = (int)((float)newH * ctx->dpiScale);
+
+    HMONITOR hMon = MonitorFromPoint(ctx->spawnCursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { .cbSize = sizeof(MONITORINFO) };
+    GetMonitorInfoW(hMon, &mi);
+
+    int x = ctx->spawnCursor.x - (ctx->overlayWidth / 2);
+    int y = ctx->spawnCursor.y - (ctx->overlayHeight / 2);
+
+    if (x < mi.rcWork.left) x = mi.rcWork.left;
+    if (y < mi.rcWork.top)  y = mi.rcWork.top;
+    if (x + ctx->overlayWidth > mi.rcWork.right)   x = mi.rcWork.right - ctx->overlayWidth;
+    if (y + ctx->overlayHeight > mi.rcWork.bottom) y = mi.rcWork.bottom - ctx->overlayHeight;
+
+    SetWindowPos(ctx->hwndOverlay, HWND_TOPMOST, x, y, ctx->overlayWidth, ctx->overlayHeight,
+                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    HDC hdcScreen = GetDC(NULL);
+    InitDIB(hdcScreen, ctx->overlayWidth, ctx->overlayHeight);
+    ReleaseDC(NULL, hdcScreen);
+}
+
+void Magify_RedrawOverlay(MagifyContext *ctx) {
+    if (!ctx || !ctx->hwndOverlay || !IsWindow(ctx->hwndOverlay)) return;
+    RenderFrame(ctx);
+}
+
+void Magify_CloseOverlay(MagifyContext *ctx) {
+    if (!ctx || ctx->isClosing) return;
+    ctx->isClosing = TRUE;
+    ctx->closeProgress = 0.0f;
+}
+
+static void ExecuteAction(MagifyContext *ctx, int slice) {
+    if (ctx->uiState == UI_STATE_RADIAL_ROOT) {
+        if (slice == 0) { // CONVERT
+            ctx->uiState = UI_STATE_RADIAL_SUB;
+            ctx->activeSubmenu = SUBMENU_CONVERT;
+            ctx->hoveredSlice = -1;
+        } else if (slice == 1) { // EDIT
+            ctx->uiState = UI_STATE_RADIAL_SUB;
+            ctx->activeSubmenu = SUBMENU_EDIT;
+            ctx->hoveredSlice = -1;
+        } else if (slice == 2) { // COMPRESS
+            ctx->uiState = UI_STATE_RADIAL_SUB;
+            ctx->activeSubmenu = SUBMENU_COMPRESS;
+            ctx->hoveredSlice = -1;
+        } else if (slice == 3) { // RENAME
+            InitRenameHUD(ctx);
+        }
+        return;
+    }
+
+    if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+        const WCHAR *file = (ctx->fileCount > 0) ? ctx->files[0] : L"sample.file";
+
+        if (ctx->activeSubmenu == SUBMENU_CONVERT) {
+            if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+                const WCHAR *exts[] = { L"PNG", L"JPG", L"BMP", L"ICO", L"PDF" };
+                if (slice >= 0 && slice < 5) {
+                    Magify_Image_Convert(file, exts[slice], ctx);
+                }
+            } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+                const WCHAR *exts[] = { L"JPG", L"PNG", L"TXT" };
+                if (slice >= 0 && slice < 3) {
+                    Magify_PDF_ConvertToImages(file, exts[slice], ctx);
+                }
+            } else {
+                if (slice == 0) Magify_CompressGenericZip(ctx);
+                else { ctx->uiState = UI_STATE_RADIAL_ROOT; ctx->hoveredSlice = -1; }
+            }
+        } else if (ctx->activeSubmenu == SUBMENU_EDIT) {
+            if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+                if (slice == 0) Magify_Image_Rotate(file, 90, ctx);
+                else if (slice == 1) Magify_Image_Rotate(file, 270, ctx);
+                else if (slice == 2) Magify_Image_Flip(file, TRUE, ctx);
+                else if (slice == 3) Magify_Image_Resize(file, 0, 0, 50, ctx);
+                else if (slice == 4) InitCropHUD(ctx);
+            } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+                if (slice == 0) Magify_PDF_RotatePages(file, 90, ctx);
+                else if (slice == 1) Magify_PDF_ConvertToImages(file, L"SPLIT", ctx);
+                else if (slice == 2) Magify_PDF_Merge((const WCHAR**)ctx->files, ctx->fileCount, NULL, ctx);
+                else if (slice == 3) Magify_PDF_RotatePages(file, 0, ctx);
+            }
+        } else if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
+            if (ctx->primaryClass == FILE_CLASS_IMAGE) {
+                int quals[] = { 90, 80, 60, -200 };
+                if (slice >= 0 && slice < 4) {
+                    Magify_Image_Compress(file, quals[slice], ctx);
+                }
+            } else if (ctx->primaryClass == FILE_CLASS_PDF) {
+                int dpis[] = { 300, 150, 96 };
+                if (slice >= 0 && slice < 3) {
+                    Magify_PDF_Compress(file, dpis[slice], ctx);
+                }
+            } else {
+                Magify_CompressGenericZip(ctx);
+            }
+        }
+    }
+}
+
+static void HandleCropMouseDown(MagifyContext *ctx, int mx, int my) {
+    int vpX = (g_surfWidth - ctx->cropPreviewW) / 2;
+    int vpY = 62 + (400 - ctx->cropPreviewH) / 2;
+    int vpW = ctx->cropPreviewW;
+    int vpH = ctx->cropPreviewH;
+
+    // Check Bottom Toolbar Buttons
+    int barY = g_surfHeight - 75;
+    if (my >= barY + 10 && my <= barY + 38) {
+        int ax = 42;
+        for (int i = 0; i < 5; i++) {
+            int bw = (i == 4) ? 58 : 50;
+            if (mx >= ax && mx <= ax + bw) {
+                ctx->cropAspectLock = i;
+                if (i > 0) {
+                    float ratios[] = { 1.0f, 1.0f, 4.0f / 3.0f, 16.0f / 9.0f, 35.0f / 45.0f };
+                    float r = ratios[i];
+                    float curPxW = ctx->cropNormW * (float)ctx->cropOrigW;
+                    float newPxH = curPxW / r;
+                    ctx->cropNormH = newPxH / (float)ctx->cropOrigH;
+                    if (ctx->cropNormH > 1.0f - ctx->cropNormY) {
+                        ctx->cropNormH = 1.0f - ctx->cropNormY;
+                        ctx->cropNormW = (ctx->cropNormH * (float)ctx->cropOrigH * r) / (float)ctx->cropOrigW;
+                    }
+                }
+                RenderFrame(ctx);
+                return;
+            }
+            ax += bw + 8;
+        }
+
+        // Rotate 90°
+        if (mx >= 365 && mx <= 445) {
+            Magify_Image_Rotate(ctx->files[0], 90, ctx);
+            InitCropHUD(ctx);
+            return;
+        }
+        // Cancel
+        if (mx >= 455 && mx <= 530) {
+            ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+            ctx->uiState = UI_STATE_RADIAL_ROOT;
+            RenderFrame(ctx);
+            return;
+        }
+        // Apply Crop
+        if (mx >= 540 && mx <= 635) {
+            int cropX = (int)(ctx->cropNormX * (float)ctx->cropOrigW);
+            int cropY = (int)(ctx->cropNormY * (float)ctx->cropOrigH);
+            int cropW = (int)(ctx->cropNormW * (float)ctx->cropOrigW);
+            int cropH = (int)(ctx->cropNormH * (float)ctx->cropOrigH);
+            Magify_CropImage(ctx->files[0], cropX, cropY, cropW, cropH, ctx);
+            ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+            return;
+        }
+    }
+
+    // Handles hit test
+    int scX = vpX + (int)(ctx->cropNormX * (float)vpW);
+    int scY = vpY + (int)(ctx->cropNormY * (float)vpH);
+    int scW = (int)(ctx->cropNormW * (float)vpW);
+    int scH = (int)(ctx->cropNormH * (float)vpH);
+
+    int hPts[8][2] = {
+        { scX, scY },                     // 0: Top-Left
+        { scX + scW, scY },               // 1: Top-Right
+        { scX + scW, scY + scH },         // 2: Bottom-Right
+        { scX, scY + scH },               // 3: Bottom-Left
+        { scX + scW / 2, scY },           // 4: Top-Mid
+        { scX + scW, scY + scH / 2 },     // 5: Right-Mid
+        { scX + scW / 2, scY + scH },     // 6: Bottom-Mid
+        { scX, scY + scH / 2 }            // 7: Left-Mid
+    };
+
+    for (int i = 0; i < 8; i++) {
+        if (abs(mx - hPts[i][0]) <= 8 && abs(my - hPts[i][1]) <= 8) {
+            ctx->cropDragMode = i;
+            ctx->cropDragStartPt.x = mx;
+            ctx->cropDragStartPt.y = my;
+            ctx->cropDragStartX = ctx->cropNormX;
+            ctx->cropDragStartY = ctx->cropNormY;
+            ctx->cropDragStartW = ctx->cropNormW;
+            ctx->cropDragStartH = ctx->cropNormH;
+            SetCapture(ctx->hwndOverlay);
+            return;
+        }
+    }
+
+    // Pan body
+    if (mx >= scX && mx <= scX + scW && my >= scY && my <= scY + scH) {
+        ctx->cropDragMode = 8; // Pan
+        ctx->cropDragStartPt.x = mx;
+        ctx->cropDragStartPt.y = my;
+        ctx->cropDragStartX = ctx->cropNormX;
+        ctx->cropDragStartY = ctx->cropNormY;
+        ctx->cropDragStartW = ctx->cropNormW;
+        ctx->cropDragStartH = ctx->cropNormH;
+        SetCapture(ctx->hwndOverlay);
+    }
+}
+
+static void HandleCropMouseMove(MagifyContext *ctx, int mx, int my) {
+    if (ctx->cropDragMode == -1) return;
+
+    int vpW = ctx->cropPreviewW;
+    int vpH = ctx->cropPreviewH;
+    if (vpW <= 0 || vpH <= 0) return;
+
+    float dx = (float)(mx - ctx->cropDragStartPt.x) / (float)vpW;
+    float dy = (float)(my - ctx->cropDragStartPt.y) / (float)vpH;
+
+    float nx = ctx->cropDragStartX;
+    float ny = ctx->cropDragStartY;
+    float nw = ctx->cropDragStartW;
+    float nh = ctx->cropDragStartH;
+
+    if (ctx->cropDragMode == 8) { // Pan
+        nx += dx;
+        ny += dy;
+        if (nx < 0.0f) nx = 0.0f;
+        if (ny < 0.0f) ny = 0.0f;
+        if (nx + nw > 1.0f) nx = 1.0f - nw;
+        if (ny + nh > 1.0f) ny = 1.0f - nh;
+    } else {
+        if (ctx->cropDragMode == 0) { // TL
+            nx += dx; ny += dy; nw -= dx; nh -= dy;
+        } else if (ctx->cropDragMode == 1) { // TR
+            ny += dy; nw += dx; nh -= dy;
+        } else if (ctx->cropDragMode == 2) { // BR
+            nw += dx; nh += dy;
+        } else if (ctx->cropDragMode == 3) { // BL
+            nx += dx; nw -= dx; nh += dy;
+        } else if (ctx->cropDragMode == 4) { // Top
+            ny += dy; nh -= dy;
+        } else if (ctx->cropDragMode == 5) { // Right
+            nw += dx;
+        } else if (ctx->cropDragMode == 6) { // Bottom
+            nh += dy;
+        } else if (ctx->cropDragMode == 7) { // Left
+            nx += dx; nw -= dx;
+        }
+
+        if (nw < 0.05f) nw = 0.05f;
+        if (nh < 0.05f) nh = 0.05f;
+        if (nx < 0.0f) { nw += nx; nx = 0.0f; }
+        if (ny < 0.0f) { nh += ny; ny = 0.0f; }
+        if (nx + nw > 1.0f) nw = 1.0f - nx;
+        if (ny + nh > 1.0f) nh = 1.0f - ny;
+
+        if (ctx->cropAspectLock > 0) {
+            float ratios[] = { 1.0f, 1.0f, 4.0f / 3.0f, 16.0f / 9.0f, 35.0f / 45.0f };
+            float r = ratios[ctx->cropAspectLock];
+            nh = (nw * (float)ctx->cropOrigW / (float)ctx->cropOrigH) / r;
+            if (ny + nh > 1.0f) {
+                nh = 1.0f - ny;
+                nw = (nh * (float)ctx->cropOrigH * r) / (float)ctx->cropOrigW;
+            }
+        }
+    }
+
+    ctx->cropNormX = nx;
+    ctx->cropNormY = ny;
+    ctx->cropNormW = nw;
+    ctx->cropNormH = nh;
+    RenderFrame(ctx);
+}
+
+static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    MagifyContext *ctx = (MagifyContext*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+
+    switch (uMsg) {
+        case WM_CREATE: {
+            CREATESTRUCTW *cs = (CREATESTRUCTW*)lParam;
+            ctx = (MagifyContext*)cs->lpCreateParams;
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
+            SetTimer(hwnd, TIMER_ANIM_ID, ANIM_INTERVAL_MS, NULL);
+            SetTimer(hwnd, TIMER_CARET_ID, 500, NULL);
+            return 0;
+        }
+
+        case WM_USER + 101: {
+            RenderFrame(ctx);
+            return 0;
+        }
+
+        case WM_TIMER: {
+            if (wParam == TIMER_ANIM_ID) {
+                if (!ctx->isClosing) {
+                    if (ctx->animProgress < 1.0f) {
+                        ctx->animProgress += 0.08f;
+                        if (ctx->animProgress > 1.0f) ctx->animProgress = 1.0f;
+                    }
+                } else {
+                    ctx->closeProgress += 0.12f;
+                    if (ctx->closeProgress >= 1.0f) {
+                        KillTimer(hwnd, TIMER_ANIM_ID);
+                        KillTimer(hwnd, TIMER_CARET_ID);
+                        DestroyWindow(hwnd);
+                        return 0;
+                    }
+                }
+                RenderFrame(ctx);
+            } else if (wParam == TIMER_CARET_ID) {
+                if (ctx->uiState == UI_STATE_RENAME_HUD) {
+                    ctx->renameCaretVisible = !ctx->renameCaretVisible;
+                    RenderFrame(ctx);
+                }
+            }
+            return 0;
+        }
+
+        case WM_MOUSEMOVE: {
+            if (ctx->isClosing) return 0;
+            TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tme);
+
+            int mx = (short)LOWORD(lParam);
+            int my = (short)HIWORD(lParam);
+
+            if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
+                HandleCropMouseMove(ctx, mx, my);
+                return 0;
+            }
+
+            float cx = (float)g_surfWidth * 0.5f;
+            float cy = (float)g_surfHeight * 0.5f;
+
+            int sliceCount = (ctx->uiState == UI_STATE_RADIAL_ROOT) ? 4 : GetSubmenuSliceCount(ctx);
+            float rotOffset = (ctx->uiState == UI_STATE_RADIAL_ROOT) ? 225.0f : (270.0f - (360.0f / (float)sliceCount) * 0.5f);
+
+            int hit = Magify_HitTestRadial(
+                (float)mx, (float)my, cx, cy,
+                52.0f, 155.0f, sliceCount, rotOffset
+            );
+
+            if (hit != ctx->hoveredSlice) {
+                ctx->hoveredSlice = hit;
+                RenderFrame(ctx);
+            }
+            return 0;
+        }
+
+        case WM_MOUSELEAVE: {
+            if (ctx->hoveredSlice != -2 && ctx->uiState < UI_STATE_RENAME_HUD) {
+                ctx->hoveredSlice = -2;
+                RenderFrame(ctx);
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            int mx = (short)LOWORD(lParam);
+            int my = (short)HIWORD(lParam);
+
+            if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
+                HandleCropMouseDown(ctx, mx, my);
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_RENAME_HUD) {
+                float cx = (float)g_surfWidth * 0.5f;
+                float cy = (float)g_surfHeight * 0.5f;
+                int pillW = 410, pillH = 124;
+                int px = (int)(cx - (float)pillW * 0.5f);
+                int py = (int)(cy - (float)pillH * 0.5f);
+
+                // Rename Button click
+                int btnW = 100, btnH = 28;
+                int btnX = px + pillW - btnW - 18;
+                int btnY = py + 84;
+                if (mx >= btnX && mx <= btnX + btnW && my >= btnY && my <= btnY + btnH) {
+                    Magify_RenameFiles(ctx, ctx->renameBuf);
+                    return 0;
+                }
+
+                // Cancel Button click
+                int cBtnW = 75;
+                int cBtnX = btnX - cBtnW - 10;
+                if (mx >= cBtnX && mx <= cBtnX + cBtnW && my >= btnY && my <= btnY + btnH) {
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+
+                // Click inside text box
+                int bx = px + 18, by = py + 36, bw = pillW - 36, bh = 38;
+                if (mx >= bx && mx <= bx + bw - 60 && my >= by && my <= by + bh) {
+                    int charPos = (mx - (bx + 12)) / 8;
+                    int len = (int)wcslen(ctx->renameBuf);
+                    if (charPos < 0) charPos = 0;
+                    if (charPos > len) charPos = len;
+                    ctx->renameCursor = charPos;
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = 0;
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                } else if (mx < px || mx > px + pillW || my < py || my > py + pillH) {
+                    // Click outside pill returns to radial root
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    RenderFrame(ctx);
+                }
+                return 0;
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONUP: {
+            if (ctx->isClosing) return 0;
+
+            if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
+                if (ctx->cropDragMode != -1) {
+                    ctx->cropDragMode = -1;
+                    ReleaseCapture();
+                }
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_RENAME_HUD) {
+                return 0;
+            }
+
+            if (ctx->hoveredSlice == -1) {
+                if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    ctx->activeSubmenu = SUBMENU_NONE;
+                    ctx->hoveredSlice = -1;
+                    RenderFrame(ctx);
+                } else {
+                    Magify_CloseOverlay(ctx);
+                }
+            } else if (ctx->hoveredSlice >= 0) {
+                ExecuteAction(ctx, ctx->hoveredSlice);
+                RenderFrame(ctx);
+            } else if (ctx->hoveredSlice == -2) {
+                Magify_CloseOverlay(ctx);
+            }
+            return 0;
+        }
+
+        case WM_RBUTTONUP: {
+            Magify_CloseOverlay(ctx);
+            return 0;
+        }
+
+        case WM_CHAR: {
+            if (ctx->uiState == UI_STATE_RENAME_HUD) {
+                WCHAR ch = (WCHAR)wParam;
+                if (ch >= 32) {
+                    // Reject invalid Windows filename chars: \ / : * ? " < > |
+                    if (ch == L'\\' || ch == L'/' || ch == L':' || ch == L'*' ||
+                        ch == L'?'  || ch == L'\"' || ch == L'<' || ch == L'>' || ch == L'|') {
+                        return 0;
+                    }
+
+                    int len = (int)wcslen(ctx->renameBuf);
+                    if (ctx->renameSelStart != ctx->renameSelEnd) {
+                        ctx->renameBuf[0] = ch;
+                        ctx->renameBuf[1] = L'\0';
+                        ctx->renameCursor = 1;
+                        ctx->renameSelStart = 0;
+                        ctx->renameSelEnd = 0;
+                    } else if (len < MAX_PATH - 32) {
+                        for (int i = len; i >= ctx->renameCursor; i--) {
+                            ctx->renameBuf[i + 1] = ctx->renameBuf[i];
+                        }
+                        ctx->renameBuf[ctx->renameCursor++] = ch;
+                    }
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                }
+                return 0;
+            }
+            return 0;
+        }
+
+        case WM_KEYDOWN: {
+            if (ctx->uiState == UI_STATE_RENAME_HUD) {
+                if (wParam == VK_RETURN) {
+                    Magify_RenameFiles(ctx, ctx->renameBuf);
+                    return 0;
+                }
+                if (wParam == VK_ESCAPE) {
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_BACK) {
+                    int len = (int)wcslen(ctx->renameBuf);
+                    if (ctx->renameSelStart != ctx->renameSelEnd) {
+                        ctx->renameBuf[0] = L'\0';
+                        ctx->renameCursor = 0;
+                        ctx->renameSelStart = 0;
+                        ctx->renameSelEnd = 0;
+                    } else if (ctx->renameCursor > 0) {
+                        for (int i = ctx->renameCursor - 1; i < len; i++) {
+                            ctx->renameBuf[i] = ctx->renameBuf[i + 1];
+                        }
+                        ctx->renameCursor--;
+                    }
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_DELETE) {
+                    int len = (int)wcslen(ctx->renameBuf);
+                    if (ctx->renameSelStart != ctx->renameSelEnd) {
+                        ctx->renameBuf[0] = L'\0';
+                        ctx->renameCursor = 0;
+                        ctx->renameSelStart = 0;
+                        ctx->renameSelEnd = 0;
+                    } else if (ctx->renameCursor < len) {
+                        for (int i = ctx->renameCursor; i < len; i++) {
+                            ctx->renameBuf[i] = ctx->renameBuf[i + 1];
+                        }
+                    }
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_LEFT) {
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = 0;
+                    if (ctx->renameCursor > 0) ctx->renameCursor--;
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_RIGHT) {
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = 0;
+                    int len = (int)wcslen(ctx->renameBuf);
+                    if (ctx->renameCursor < len) ctx->renameCursor++;
+                    ctx->renameCaretVisible = TRUE;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_HOME) {
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = 0;
+                    ctx->renameCursor = 0;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_END) {
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = 0;
+                    ctx->renameCursor = (int)wcslen(ctx->renameBuf);
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == 'A' || wParam == 'a')) {
+                    ctx->renameSelStart = 0;
+                    ctx->renameSelEnd = (int)wcslen(ctx->renameBuf);
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if ((GetKeyState(VK_CONTROL) & 0x8000) && (wParam == 'V' || wParam == 'v')) {
+                    if (OpenClipboard(hwnd)) {
+                        HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                        if (hData) {
+                            const WCHAR *pClip = (const WCHAR*)GlobalLock(hData);
+                            if (pClip) {
+                                while (*pClip && ctx->renameCursor < MAX_PATH - 32) {
+                                    WCHAR ch = *pClip++;
+                                    if (ch >= 32 && ch != L'\\' && ch != L'/' && ch != L':' &&
+                                        ch != L'*'  && ch != L'?'  && ch != L'\"' && ch != L'<' &&
+                                        ch != L'>'  && ch != L'|') {
+                                        ctx->renameBuf[ctx->renameCursor++] = ch;
+                                        ctx->renameBuf[ctx->renameCursor] = L'\0';
+                                    }
+                                }
+                                GlobalUnlock(hData);
+                            }
+                        }
+                        CloseClipboard();
+                        ctx->renameSelStart = 0;
+                        ctx->renameSelEnd = 0;
+                        RenderFrame(ctx);
+                    }
+                    return 0;
+                }
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
+                if (wParam == VK_ESCAPE) {
+                    ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+                if (wParam == VK_RETURN) {
+                    int cropX = (int)(ctx->cropNormX * (float)ctx->cropOrigW);
+                    int cropY = (int)(ctx->cropNormY * (float)ctx->cropOrigH);
+                    int cropW = (int)(ctx->cropNormW * (float)ctx->cropOrigW);
+                    int cropH = (int)(ctx->cropNormH * (float)ctx->cropOrigH);
+                    Magify_CropImage(ctx->files[0], cropX, cropY, cropW, cropH, ctx);
+                    ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+                    return 0;
+                }
+                return 0;
+            }
+
+            if (wParam == VK_ESCAPE) {
+                if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    ctx->activeSubmenu = SUBMENU_NONE;
+                    ctx->hoveredSlice = -1;
+                    RenderFrame(ctx);
+                } else {
+                    Magify_CloseOverlay(ctx);
+                }
+            } else if (wParam == 'C' || wParam == 'c') {
+                ExecuteAction(ctx, 0); // Convert
+            } else if (wParam == 'E' || wParam == 'e') {
+                ExecuteAction(ctx, 1); // Edit
+            } else if (wParam == 'M' || wParam == 'm') {
+                ExecuteAction(ctx, 2); // Compress
+            } else if (wParam == 'R' || wParam == 'r') {
+                InitRenameHUD(ctx);
+                RenderFrame(ctx);
+            }
+            return 0;
+        }
+
+        case WM_ACTIVATE: {
+            if (LOWORD(wParam) == WA_INACTIVE && ctx->uiState < UI_STATE_RENAME_HUD) {
+                Magify_CloseOverlay(ctx);
+            }
+            return 0;
+        }
+
+        case WM_DESTROY: {
+            if (ctx && ctx->cropPreviewPixels) {
+                free(ctx->cropPreviewPixels);
+                ctx->cropPreviewPixels = NULL;
+            }
+            Magify_Image_Shutdown();
+            PostQuitMessage(0);
+            return 0;
+        }
+    }
+
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+HWND Magify_CreateOverlayWindow(HINSTANCE hInst, int width, int height, POINT cursor) {
+    HMONITOR hMon = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = { .cbSize = sizeof(MONITORINFO) };
+    GetMonitorInfoW(hMon, &mi);
+
+    int x = cursor.x - (width / 2);
+    int y = cursor.y - (height / 2);
+
+    if (x < mi.rcWork.left) x = mi.rcWork.left;
+    if (y < mi.rcWork.top)  y = mi.rcWork.top;
+    if (x + width > mi.rcWork.right)   x = mi.rcWork.right - width;
+    if (y + height > mi.rcWork.bottom) y = mi.rcWork.bottom - height;
+
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = OverlayWndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = L"MagifyOverlayClass";
+
+    RegisterClassExW(&wc);
+
+    HWND hwnd = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        L"MagifyOverlayClass",
+        L"Magify",
+        WS_POPUP,
+        x, y, width, height,
+        NULL, NULL, hInst, g_overlayCtx
+    );
+
+    return hwnd;
+}
+
+void Magify_ShowOverlay(MagifyContext *ctx) {
+    g_overlayCtx = ctx;
+
+    Magify_Image_Init();
+
+    HDC hdcScreen = GetDC(NULL);
+    InitDIB(hdcScreen, ctx->overlayWidth, ctx->overlayHeight);
+    ReleaseDC(NULL, hdcScreen);
+
+    ctx->animProgress = 0.0f;
+    ctx->closeProgress = 0.0f;
+    ctx->isClosing = FALSE;
+    ctx->hoveredSlice = -1;
+
+    ctx->hwndOverlay = Magify_CreateOverlayWindow(
+        ctx->hInstance,
+        ctx->overlayWidth,
+        ctx->overlayHeight,
+        ctx->spawnCursor
+    );
+
+    if (!ctx->hwndOverlay) return;
+
+    ShowWindow(ctx->hwndOverlay, SW_SHOW);
+    UpdateWindow(ctx->hwndOverlay);
+    SetForegroundWindow(ctx->hwndOverlay);
+    SetFocus(ctx->hwndOverlay);
+
+    RenderFrame(ctx);
+}
