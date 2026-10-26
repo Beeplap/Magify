@@ -28,51 +28,23 @@ void Magify_Image_Shutdown(void) {
 }
 
 static void GetOutputPath(const WCHAR *srcPath, const WCHAR *suffix, const WCHAR *newExt,
-                          BOOL overwriteRequested, WCHAR *outPath, BOOL *isOverwrite) {
-    *isOverwrite = overwriteRequested;
-    if (overwriteRequested) {
-        wcsncpy(outPath, srcPath, MAX_PATH - 1);
-        outPath[MAX_PATH - 1] = L'\0';
-        return;
-    }
-
-    WCHAR dir[MAX_PATH];
-    wcsncpy(dir, srcPath, MAX_PATH - 1);
-    dir[MAX_PATH - 1] = L'\0';
-    PathRemoveFileSpecW(dir);
-
-    WCHAR base[MAX_PATH];
-    wcsncpy(base, PathFindFileNameW(srcPath), MAX_PATH - 1);
-    base[MAX_PATH - 1] = L'\0';
-    PathRemoveExtensionW(base);
-
-    const WCHAR *ext = (newExt && newExt[0]) ? newExt : PathFindExtensionW(srcPath);
-    if (ext[0] != L'.') {
-        swprintf(outPath, MAX_PATH, L"%ls\\%ls_%ls.%ls", dir, base, suffix, ext);
-    } else {
-        swprintf(outPath, MAX_PATH, L"%ls\\%ls_%ls%ls", dir, base, suffix, ext);
-    }
+                          BOOL overwriteRequested, WCHAR *outPath, WCHAR *tmpPath) {
+    Magify_GetSafeOutputPath(srcPath, suffix, newExt, overwriteRequested, outPath, tmpPath);
 }
 
-static BOOL SaveBitmapSafely(GpBitmap *bmp, const WCHAR *targetPath, const CLSID *clsid,
-                             const EncoderParameters *params, BOOL overwrite) {
-    if (overwrite) {
-        WCHAR dir[MAX_PATH];
-        wcsncpy(dir, targetPath, MAX_PATH - 1);
-        dir[MAX_PATH - 1] = L'\0';
-        PathRemoveFileSpecW(dir);
-
-        WCHAR tmpPath[MAX_PATH];
-        swprintf(tmpPath, MAX_PATH, L"%ls\\__magify_tmp_%lu.tmp", dir, GetTickCount());
-
-        if (GdipSaveImageToFile(bmp, tmpPath, clsid, params) != Ok) {
-            return FALSE;
+static BOOL SaveBitmapSafely(GpBitmap *bmp, const WCHAR *srcPath, const WCHAR *outPath,
+                             const WCHAR *tmpPath, const CLSID *clsid,
+                             const EncoderParameters *params, BOOL overwrite, MagifyContext *ctx) {
+    const WCHAR *saveFile = overwrite ? tmpPath : outPath;
+    if (GdipSaveImageToFile(bmp, saveFile, clsid, params) != Ok) {
+        if (ctx) {
+            ctx->isErrorState = TRUE;
+            swprintf(ctx->progressStatusText, 128, L"Failed to save image file");
+            wcsncpy(ctx->statusText, ctx->progressStatusText, 127);
         }
-
-        return MoveFileExW(tmpPath, targetPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
+        return FALSE;
     }
-
-    return (GdipSaveImageToFile(bmp, targetPath, clsid, params) == Ok);
+    return Magify_FinalizeOutputFile(srcPath, tmpPath, outPath, overwrite, ctx);
 }
 
 typedef struct {
@@ -118,22 +90,25 @@ static DWORD WINAPI ConvertWorker(void *arg) {
     GdipGetImageWidth(bmp, &w);
     GdipGetImageHeight(bmp, &h);
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
 
     if (_wcsicmp(p->formatOrAction, L"PNG") == 0) {
-        GetOutputPath(p->srcPath, L"converted", L".png", p->overwrite, outPath, &isOverwrite);
+        GetOutputPath(p->srcPath, L"converted", L".png", p->overwrite, outPath, tmpPath);
         p->ctx->jobProgress = 60;
+        p->ctx->progressPercent = 60;
         swprintf(p->ctx->statusText, 128, L"Encoding lossless PNG...");
-        if (SaveBitmapSafely(bmp, outPath, &CLSID_PNG, NULL, isOverwrite)) {
-            swprintf(p->ctx->statusText, 128, L"Saved PNG: %ls", PathFindFileNameW(outPath));
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+        if (SaveBitmapSafely(bmp, p->srcPath, outPath, tmpPath, &CLSID_PNG, NULL, p->overwrite, p->ctx)) {
+            swprintf(p->ctx->statusText, 128, L"Saved PNG: %ls", PathFindFileNameW(p->overwrite ? p->srcPath : outPath));
         } else {
             swprintf(p->ctx->statusText, 128, L"Failed to save PNG");
         }
     } else if (_wcsicmp(p->formatOrAction, L"JPG") == 0 || _wcsicmp(p->formatOrAction, L"JPEG") == 0) {
-        GetOutputPath(p->srcPath, L"converted", L".jpg", p->overwrite, outPath, &isOverwrite);
+        GetOutputPath(p->srcPath, L"converted", L".jpg", p->overwrite, outPath, tmpPath);
         p->ctx->jobProgress = 50;
+        p->ctx->progressPercent = 50;
         swprintf(p->ctx->statusText, 128, L"Encoding JPEG (92%%)...");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
         // Composite onto solid white background
         GpBitmap *rgbBmp = NULL;
@@ -151,25 +126,28 @@ static DWORD WINAPI ConvertWorker(void *arg) {
         ULONG quality = 92;
         params.Parameter[0].Value = &quality;
 
-        if (SaveBitmapSafely(rgbBmp, outPath, &CLSID_JPEG, &params, isOverwrite)) {
-            swprintf(p->ctx->statusText, 128, L"Saved JPG: %ls", PathFindFileNameW(outPath));
+        if (SaveBitmapSafely(rgbBmp, p->srcPath, outPath, tmpPath, &CLSID_JPEG, &params, p->overwrite, p->ctx)) {
+            swprintf(p->ctx->statusText, 128, L"Saved JPG: %ls", PathFindFileNameW(p->overwrite ? p->srcPath : outPath));
         } else {
             swprintf(p->ctx->statusText, 128, L"Failed to save JPG");
         }
         GdipDeleteGraphics(gfx);
         GdipDisposeImage(rgbBmp);
     } else if (_wcsicmp(p->formatOrAction, L"BMP") == 0) {
-        GetOutputPath(p->srcPath, L"converted", L".bmp", p->overwrite, outPath, &isOverwrite);
+        GetOutputPath(p->srcPath, L"converted", L".bmp", p->overwrite, outPath, tmpPath);
         p->ctx->jobProgress = 60;
-        if (SaveBitmapSafely(bmp, outPath, &CLSID_BMP, NULL, isOverwrite)) {
-            swprintf(p->ctx->statusText, 128, L"Saved BMP: %ls", PathFindFileNameW(outPath));
+        p->ctx->progressPercent = 60;
+        if (SaveBitmapSafely(bmp, p->srcPath, outPath, tmpPath, &CLSID_BMP, NULL, p->overwrite, p->ctx)) {
+            swprintf(p->ctx->statusText, 128, L"Saved BMP: %ls", PathFindFileNameW(p->overwrite ? p->srcPath : outPath));
         } else {
             swprintf(p->ctx->statusText, 128, L"Failed to save BMP");
         }
     } else if (_wcsicmp(p->formatOrAction, L"ICO") == 0) {
-        GetOutputPath(p->srcPath, L"icon", L".ico", p->overwrite, outPath, &isOverwrite);
+        GetOutputPath(p->srcPath, L"icon", L".ico", p->overwrite, outPath, tmpPath);
         p->ctx->jobProgress = 40;
+        p->ctx->progressPercent = 40;
         swprintf(p->ctx->statusText, 128, L"Building multi-resolution ICO...");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
         // Standard Windows icon resolutions: 256, 48, 32, 16
         const int icoSizes[] = { 256, 48, 32, 16 };
@@ -202,7 +180,8 @@ static DWORD WINAPI ConvertWorker(void *arg) {
             GdipDisposeImage(scaled);
         }
 
-        HANDLE hIco = CreateFileW(outPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        const WCHAR *icoFile = p->overwrite ? tmpPath : outPath;
+        HANDLE hIco = CreateFileW(icoFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hIco != INVALID_HANDLE_VALUE) {
             uint16_t idReserved = 0;
             uint16_t idType = 1; // ICO
@@ -243,8 +222,10 @@ static DWORD WINAPI ConvertWorker(void *arg) {
                 }
             }
             CloseHandle(hIco);
-            swprintf(p->ctx->statusText, 128, L"Created ICO: %ls", PathFindFileNameW(outPath));
+            Magify_FinalizeOutputFile(p->srcPath, tmpPath, outPath, p->overwrite, p->ctx);
+            swprintf(p->ctx->statusText, 128, L"Created ICO: %ls", PathFindFileNameW(p->overwrite ? p->srcPath : outPath));
         } else {
+            p->ctx->isErrorState = TRUE;
             swprintf(p->ctx->statusText, 128, L"Failed to create ICO");
         }
     } else if (_wcsicmp(p->formatOrAction, L"PDF") == 0) {
@@ -254,7 +235,9 @@ static DWORD WINAPI ConvertWorker(void *arg) {
     }
 
     GdipDisposeImage(bmp);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     free(p);
     return 0;
 }
@@ -292,11 +275,15 @@ static DWORD WINAPI RotateWorker(void *arg) {
     Magify_Image_Init();
 
     p->ctx->jobProgress = 25;
+    p->ctx->progressPercent = 25;
     swprintf(p->ctx->statusText, 128, L"Rotating %d°...", p->intParam);
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GpBitmap *bmp = NULL;
     if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -308,25 +295,31 @@ static DWORD WINAPI RotateWorker(void *arg) {
 
     GdipImageRotateFlip(bmp, rft);
     p->ctx->jobProgress = 65;
+    p->ctx->progressPercent = 65;
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
     WCHAR suffix[32];
     swprintf(suffix, 32, L"rot%d", p->intParam);
-    GetOutputPath(p->srcPath, suffix, NULL, p->overwrite, outPath, &isOverwrite);
+    GetOutputPath(p->srcPath, suffix, NULL, p->overwrite, outPath, tmpPath);
 
     const WCHAR *ext = PathFindExtensionW(p->srcPath);
     const CLSID *clsid = &CLSID_PNG;
     if (_wcsicmp(ext, L".jpg") == 0 || _wcsicmp(ext, L".jpeg") == 0) clsid = &CLSID_JPEG;
     else if (_wcsicmp(ext, L".bmp") == 0) clsid = &CLSID_BMP;
 
-    if (SaveBitmapSafely(bmp, outPath, clsid, NULL, isOverwrite)) {
-        swprintf(p->ctx->statusText, 128, L"Rotated %d°: %ls", p->intParam, PathFindFileNameW(outPath));
+    if (SaveBitmapSafely(bmp, p->srcPath, outPath, tmpPath, clsid, NULL, p->overwrite, p->ctx)) {
+        if (p->overwrite) {
+            swprintf(p->ctx->statusText, 128, L"Rotated %d° (in-place)", p->intParam);
+        } else {
+            swprintf(p->ctx->statusText, 128, L"Rotated %d°: %ls", p->intParam, PathFindFileNameW(outPath));
+        }
     } else {
         swprintf(p->ctx->statusText, 128, L"Failed to save rotated image");
     }
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GdipDisposeImage(bmp);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
     return 0;
@@ -338,7 +331,7 @@ BOOL Magify_Image_Rotate(const WCHAR *srcPath, int angleDegrees, MagifyContext *
     p->ctx = ctx;
     wcsncpy(p->srcPath, srcPath, MAX_PATH - 1);
     p->intParam = angleDegrees;
-    p->overwrite = ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    p->overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
 
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)RotateWorker, p);
     return TRUE;
@@ -349,11 +342,15 @@ static DWORD WINAPI FlipWorker(void *arg) {
     Magify_Image_Init();
 
     p->ctx->jobProgress = 30;
+    p->ctx->progressPercent = 30;
     swprintf(p->ctx->statusText, 128, L"Flipping image...");
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GpBitmap *bmp = NULL;
     if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -361,23 +358,30 @@ static DWORD WINAPI FlipWorker(void *arg) {
     RotateFlipType rft = p->boolParam ? RotateNoneFlipX : RotateNoneFlipY;
     GdipImageRotateFlip(bmp, rft);
     p->ctx->jobProgress = 70;
+    p->ctx->progressPercent = 70;
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
-    GetOutputPath(p->srcPath, p->boolParam ? L"fliph" : L"flipv", NULL, p->overwrite, outPath, &isOverwrite);
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
+    GetOutputPath(p->srcPath, p->boolParam ? L"fliph" : L"flipv", NULL, p->overwrite, outPath, tmpPath);
 
     const WCHAR *ext = PathFindExtensionW(p->srcPath);
     const CLSID *clsid = &CLSID_PNG;
     if (_wcsicmp(ext, L".jpg") == 0 || _wcsicmp(ext, L".jpeg") == 0) clsid = &CLSID_JPEG;
 
-    if (SaveBitmapSafely(bmp, outPath, clsid, NULL, isOverwrite)) {
-        swprintf(p->ctx->statusText, 128, L"Flipped %ls: %ls",
-                 p->boolParam ? L"Horizontal" : L"Vertical", PathFindFileNameW(outPath));
+    if (SaveBitmapSafely(bmp, p->srcPath, outPath, tmpPath, clsid, NULL, p->overwrite, p->ctx)) {
+        if (p->overwrite) {
+            swprintf(p->ctx->statusText, 128, L"Flipped %ls (in-place)",
+                     p->boolParam ? L"Horizontal" : L"Vertical");
+        } else {
+            swprintf(p->ctx->statusText, 128, L"Flipped %ls: %ls",
+                     p->boolParam ? L"Horizontal" : L"Vertical", PathFindFileNameW(outPath));
+        }
     } else {
         swprintf(p->ctx->statusText, 128, L"Failed to flip image");
     }
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GdipDisposeImage(bmp);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
     return 0;
@@ -389,7 +393,7 @@ BOOL Magify_Image_Flip(const WCHAR *srcPath, BOOL horizontal, MagifyContext *ctx
     p->ctx = ctx;
     wcsncpy(p->srcPath, srcPath, MAX_PATH - 1);
     p->boolParam = horizontal;
-    p->overwrite = ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    p->overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
 
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)FlipWorker, p);
     return TRUE;
@@ -400,11 +404,15 @@ static DWORD WINAPI ResizeWorker(void *arg) {
     Magify_Image_Init();
 
     p->ctx->jobProgress = 20;
+    p->ctx->progressPercent = 20;
     swprintf(p->ctx->statusText, 128, L"Resizing image...");
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GpBitmap *src = NULL;
     if (GdipCreateBitmapFromFile(p->srcPath, &src) != Ok || !src) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -439,26 +447,32 @@ static DWORD WINAPI ResizeWorker(void *arg) {
     GdipDrawImageRectRectI(g, src, 0, 0, newW, newH, 0, 0, (int)origW, (int)origH, 2, NULL, NULL, NULL);
 
     p->ctx->jobProgress = 70;
+    p->ctx->progressPercent = 70;
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
     WCHAR sfx[32];
     swprintf(sfx, 32, L"%dx%d", newW, newH);
-    GetOutputPath(p->srcPath, sfx, NULL, p->overwrite, outPath, &isOverwrite);
+    GetOutputPath(p->srcPath, sfx, NULL, p->overwrite, outPath, tmpPath);
 
     const WCHAR *ext = PathFindExtensionW(p->srcPath);
     const CLSID *clsid = &CLSID_PNG;
     if (_wcsicmp(ext, L".jpg") == 0 || _wcsicmp(ext, L".jpeg") == 0) clsid = &CLSID_JPEG;
 
-    if (SaveBitmapSafely(dst, outPath, clsid, NULL, isOverwrite)) {
-        swprintf(p->ctx->statusText, 128, L"Resized to %dx%d px", newW, newH);
+    if (SaveBitmapSafely(dst, p->srcPath, outPath, tmpPath, clsid, NULL, p->overwrite, p->ctx)) {
+        if (p->overwrite) {
+            swprintf(p->ctx->statusText, 128, L"Resized to %dx%d (in-place)", newW, newH);
+        } else {
+            swprintf(p->ctx->statusText, 128, L"Resized to %dx%d px", newW, newH);
+        }
     } else {
         swprintf(p->ctx->statusText, 128, L"Failed to save resized image");
     }
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GdipDeleteGraphics(g);
     GdipDisposeImage(dst);
     GdipDisposeImage(src);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
     return 0;
@@ -474,7 +488,7 @@ BOOL Magify_Image_Resize(const WCHAR *srcPath, int targetW, int targetH, int per
     else if (targetW == 1080) p->intParam = -1080;
     else p->intParam = targetW;
 
-    p->overwrite = ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    p->overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)ResizeWorker, p);
     return TRUE;
 }
@@ -563,20 +577,23 @@ BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, Ma
         return FALSE;
     }
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
     WCHAR sfx[32];
     swprintf(sfx, 32, L"target_%luKB", (unsigned long)(maxBytes / 1024));
-    GetOutputPath(srcPath, sfx, L".jpg", ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0), outPath, &isOverwrite);
+    BOOL overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    GetOutputPath(srcPath, sfx, L".jpg", overwrite, outPath, tmpPath);
 
-    HANDLE hOut = CreateFileW(outPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    const WCHAR *saveFile = overwrite ? tmpPath : outPath;
+    HANDLE hOut = CreateFileW(saveFile, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hOut != INVALID_HANDLE_VALUE) {
         DWORD bw = 0;
         WriteFile(hOut, bestBuf, (DWORD)bestSize, &bw, NULL);
         CloseHandle(hOut);
+        Magify_FinalizeOutputFile(srcPath, tmpPath, outPath, overwrite, ctx);
         WCHAR szStr[32];
         Magify_FormatFileSize(bestSize, szStr, 32);
         swprintf(ctx->statusText, 128, L"Compressed to %ls (Q%d)", szStr, bestQ);
+        wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
     }
     free(bestBuf);
 
@@ -594,18 +611,24 @@ static DWORD WINAPI CompressWorker(void *arg) {
     if (p->intParam < 0) {
         size_t maxBytes = (size_t)(-p->intParam) * 1024;
         p->ctx->jobProgress = 40;
+        p->ctx->progressPercent = 40;
         Magify_CompressImageToTargetBytes(p->srcPath, maxBytes, p->ctx);
+        p->ctx->progressPercent = 100;
         p->ctx->jobProgress = 100;
         free(p);
         return 0;
     }
 
     p->ctx->jobProgress = 25;
+    p->ctx->progressPercent = 25;
     swprintf(p->ctx->statusText, 128, L"Compressing (%d%%)...", p->intParam);
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GpBitmap *bmp = NULL;
     if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -618,28 +641,24 @@ static DWORD WINAPI CompressWorker(void *arg) {
     ULONG qVal = (ULONG)p->intParam;
     params.Parameter[0].Value = &qVal;
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
     WCHAR sfx[32];
     swprintf(sfx, 32, L"q%d", p->intParam);
-    GetOutputPath(p->srcPath, sfx, L".jpg", p->overwrite, outPath, &isOverwrite);
+    GetOutputPath(p->srcPath, sfx, L".jpg", p->overwrite, outPath, tmpPath);
 
     p->ctx->jobProgress = 70;
-    if (SaveBitmapSafely(bmp, outPath, &CLSID_JPEG, &params, isOverwrite)) {
-        uint64_t newBytes = Magify_GetFileSize(outPath);
-        int pct = 0;
-        if (origBytes > 0 && newBytes < origBytes) {
-            pct = (int)(((origBytes - newBytes) * 100) / origBytes);
-        }
-        WCHAR oStr[32], nStr[32];
-        Magify_FormatFileSize(origBytes, oStr, 32);
-        Magify_FormatFileSize(newBytes, nStr, 32);
-        swprintf(p->ctx->statusText, 128, L"Saved -%d%% (%ls -> %ls)", pct, oStr, nStr);
+    p->ctx->progressPercent = 70;
+    if (SaveBitmapSafely(bmp, p->srcPath, outPath, tmpPath, &CLSID_JPEG, &params, p->overwrite, p->ctx)) {
+        uint64_t newBytes = p->ctx->finalTotalBytes;
+        Magify_FormatSizeDelta(origBytes, newBytes, p->ctx->progressStatusText, 128);
+        wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
     } else {
         swprintf(p->ctx->statusText, 128, L"Compression failed");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     }
 
     GdipDisposeImage(bmp);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
     return 0;
@@ -651,7 +670,7 @@ BOOL Magify_Image_Compress(const WCHAR *srcPath, int qualityOrTarget, MagifyCont
     p->ctx = ctx;
     wcsncpy(p->srcPath, srcPath, MAX_PATH - 1);
     p->intParam = qualityOrTarget;
-    p->overwrite = ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    p->overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
 
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)CompressWorker, p);
     return TRUE;
@@ -662,42 +681,54 @@ static DWORD WINAPI CropWorker(void *arg) {
     Magify_Image_Init();
 
     p->ctx->jobProgress = 30;
+    p->ctx->progressPercent = 30;
     swprintf(p->ctx->statusText, 128, L"Cropping image (%dx%d)...", p->cropW, p->cropH);
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GpBitmap *src = NULL;
     if (GdipCreateBitmapFromFile(p->srcPath, &src) != Ok || !src) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
 
     GpBitmap *cropped = NULL;
     if (GdipCloneBitmapAreaI(p->cropX, p->cropY, p->cropW, p->cropH, PixelFormat32bppARGB, src, &cropped) != Ok || !cropped) {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to crop region");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         GdipDisposeImage(src);
         free(p);
         return 0;
     }
 
     p->ctx->jobProgress = 70;
+    p->ctx->progressPercent = 70;
 
-    WCHAR outPath[MAX_PATH];
-    BOOL isOverwrite = FALSE;
-    GetOutputPath(p->srcPath, L"cropped", NULL, p->overwrite, outPath, &isOverwrite);
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
+    GetOutputPath(p->srcPath, L"cropped", NULL, p->overwrite, outPath, tmpPath);
 
     const WCHAR *ext = PathFindExtensionW(p->srcPath);
     const CLSID *clsid = &CLSID_PNG;
     if (_wcsicmp(ext, L".jpg") == 0 || _wcsicmp(ext, L".jpeg") == 0) clsid = &CLSID_JPEG;
 
-    if (SaveBitmapSafely(cropped, outPath, clsid, NULL, isOverwrite)) {
-        swprintf(p->ctx->statusText, 128, L"Cropped to %dx%d: %ls",
-                 p->cropW, p->cropH, PathFindFileNameW(outPath));
+    if (SaveBitmapSafely(cropped, p->srcPath, outPath, tmpPath, clsid, NULL, p->overwrite, p->ctx)) {
+        if (p->overwrite) {
+            swprintf(p->ctx->statusText, 128, L"Cropped %dx%d (in-place)", p->cropW, p->cropH);
+        } else {
+            swprintf(p->ctx->statusText, 128, L"Cropped to %dx%d: %ls",
+                     p->cropW, p->cropH, PathFindFileNameW(outPath));
+        }
     } else {
         swprintf(p->ctx->statusText, 128, L"Failed to save cropped image");
     }
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GdipDisposeImage(cropped);
     GdipDisposeImage(src);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
     return 0;
@@ -712,7 +743,7 @@ BOOL Magify_CropImage(const WCHAR *srcPath, int cropX, int cropY, int cropW, int
     p->cropY = cropY;
     p->cropW = cropW;
     p->cropH = cropH;
-    p->overwrite = ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
+    p->overwrite = ctx->overwriteInPlace || ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0);
 
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)CropWorker, p);
     return TRUE;
@@ -765,7 +796,18 @@ static DWORD WINAPI ImagesToPDFWorker(void *arg) {
 
     // Page, Content, and Image objects for each file
     for (int i = 0; i < p->count; i++) {
-        p->ctx->jobProgress = 20 + (int)(((float)(i + 1) / (float)p->count) * 60.0f);
+        if (p->ctx->cancelRequested) {
+            CloseHandle(hPdf);
+            DeleteFileW(p->outPdfPath);
+            free(p);
+            return 0;
+        }
+
+        int pct = 20 + (int)(((float)(i + 1) / (float)p->count) * 60.0f);
+        p->ctx->jobProgress = pct;
+        p->ctx->progressPercent = pct;
+        swprintf(p->ctx->statusText, 128, L"Processing image %d of %d...", i + 1, p->count);
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
         GpBitmap *bmp = NULL;
         if (GdipCreateBitmapFromFile(p->files[i], &bmp) != Ok || !bmp) continue;
@@ -865,8 +907,11 @@ static DWORD WINAPI ImagesToPDFWorker(void *arg) {
 
     CloseHandle(hPdf);
 
+    p->ctx->finalTotalBytes = Magify_GetFileSize(p->outPdfPath);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     swprintf(p->ctx->statusText, 128, L"Created PDF: %ls", PathFindFileNameW(p->outPdfPath));
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     free(p);
     return 0;
 }

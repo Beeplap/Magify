@@ -1514,20 +1514,31 @@ typedef struct {
 
 static DWORD WINAPI WorkerRotate(void *arg) {
     PdfWorkerParam *p = (PdfWorkerParam*)arg;
-    WCHAR outPath[MAX_PATH];
-    WCHAR dir[MAX_PATH], base[MAX_PATH];
-    wcsncpy(dir, p->srcPath, MAX_PATH - 1);
-    PathRemoveFileSpecW(dir);
-    wcsncpy(base, PathFindFileNameW(p->srcPath), MAX_PATH - 1);
-    PathRemoveExtensionW(base);
-    swprintf(outPath, MAX_PATH, L"%ls\\%ls_rotated.pdf", dir, base);
+    p->ctx->progressPercent = 30;
+    p->ctx->jobProgress = 30;
+    swprintf(p->ctx->progressStatusText, 128, L"Rotating PDF pages...");
+    wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
 
-    BOOL ok = Magify_PdfRotateAllSync(p->srcPath, outPath, p->intParam);
-    if (ok) swprintf(p->ctx->statusText, 128, L"Rotated all pages %d°", p->intParam);
-    else swprintf(p->ctx->statusText, 128, L"Rotation failed");
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
+    Magify_GetSafeOutputPath(p->srcPath, L"rotated", L".pdf", p->ctx->overwriteInPlace, outPath, tmpPath);
+    const WCHAR *target = p->ctx->overwriteInPlace ? tmpPath : outPath;
 
+    BOOL ok = Magify_PdfRotateAllSync(p->srcPath, target, p->intParam);
+    if (ok) {
+        Magify_FinalizeOutputFile(p->srcPath, tmpPath, outPath, p->ctx->overwriteInPlace, p->ctx);
+        if (p->ctx->overwriteInPlace) {
+            swprintf(p->ctx->statusText, 128, L"Rotated pages %d° (in-place)", p->intParam);
+        } else {
+            swprintf(p->ctx->statusText, 128, L"Rotated pages %d°: %ls", p->intParam, PathFindFileNameW(outPath));
+        }
+    } else {
+        p->ctx->isErrorState = TRUE;
+        swprintf(p->ctx->statusText, 128, L"PDF rotation failed");
+    }
+
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(400);
     free(p);
     return 0;
 }
@@ -1545,12 +1556,22 @@ BOOL Magify_PdfRotateAll(MagifyContext *ctx, int deltaDegrees) {
 
 static DWORD WINAPI WorkerSplit(void *arg) {
     PdfWorkerParam *p = (PdfWorkerParam*)arg;
-    BOOL ok = Magify_PdfSplitSync(p->srcPath, p->paramStr, NULL);
-    if (ok) swprintf(p->ctx->statusText, 128, L"Burst all pages into separate PDFs");
-    else swprintf(p->ctx->statusText, 128, L"Split failed");
+    p->ctx->progressPercent = 40;
+    p->ctx->jobProgress = 40;
+    swprintf(p->ctx->progressStatusText, 128, L"Splitting PDF document...");
+    wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
 
+    BOOL ok = Magify_PdfSplitSync(p->srcPath, p->paramStr, NULL);
+    if (ok) {
+        swprintf(p->ctx->statusText, 128, L"Burst all pages into separate PDFs");
+    } else {
+        p->ctx->isErrorState = TRUE;
+        swprintf(p->ctx->statusText, 128, L"Split failed");
+    }
+
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(400);
     free(p);
     return 0;
 }
@@ -1568,27 +1589,34 @@ BOOL Magify_PdfSplit(MagifyContext *ctx, const WCHAR *rangeSpec) {
 
 static DWORD WINAPI WorkerMerge(void *arg) {
     PdfWorkerParam *p = (PdfWorkerParam*)arg;
+    p->ctx->progressPercent = 30;
+    p->ctx->jobProgress = 30;
+    swprintf(p->ctx->progressStatusText, 128, L"Merging PDF documents...");
+    wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
+
     const WCHAR *list[MAGIFY_MAX_FILES];
     for (int i = 0; i < p->ctx->fileCount; i++) list[i] = p->ctx->files[i];
 
-    WCHAR outPath[MAX_PATH];
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
     if (p->outPath[0]) {
         wcsncpy(outPath, p->outPath, MAX_PATH - 1);
+        outPath[MAX_PATH - 1] = L'\0';
     } else {
-        WCHAR dir[MAX_PATH], base[MAX_PATH];
-        wcsncpy(dir, p->ctx->files[0], MAX_PATH - 1);
-        PathRemoveFileSpecW(dir);
-        wcsncpy(base, PathFindFileNameW(p->ctx->files[0]), MAX_PATH - 1);
-        PathRemoveExtensionW(base);
-        swprintf(outPath, MAX_PATH, L"%ls\\%ls_merged.pdf", dir, base);
+        Magify_GetSafeOutputPath(p->ctx->files[0], L"merged", L".pdf", FALSE, outPath, tmpPath);
     }
 
     BOOL ok = Magify_PdfMergeSync(list, p->ctx->fileCount, outPath);
-    if (ok) swprintf(p->ctx->statusText, 128, L"Merged %d PDFs into %ls", p->ctx->fileCount, PathFindFileNameW(outPath));
-    else swprintf(p->ctx->statusText, 128, L"Merge failed");
+    if (ok) {
+        p->ctx->finalTotalBytes = Magify_GetFileSize(outPath);
+        swprintf(p->ctx->statusText, 128, L"Merged %d PDFs into %ls", p->ctx->fileCount, PathFindFileNameW(outPath));
+    } else {
+        p->ctx->isErrorState = TRUE;
+        swprintf(p->ctx->statusText, 128, L"Merge failed");
+    }
 
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(400);
     free(p);
     return 0;
 }
@@ -1624,27 +1652,31 @@ BOOL Magify_PdfMerge(MagifyContext *ctx, const WCHAR *outputPath) {
 
 static DWORD WINAPI WorkerCompress(void *arg) {
     PdfWorkerParam *p = (PdfWorkerParam*)arg;
-    WCHAR outPath[MAX_PATH];
-    WCHAR dir[MAX_PATH], base[MAX_PATH];
-    wcsncpy(dir, p->srcPath, MAX_PATH - 1);
-    PathRemoveFileSpecW(dir);
-    wcsncpy(base, PathFindFileNameW(p->srcPath), MAX_PATH - 1);
-    PathRemoveExtensionW(base);
-    swprintf(outPath, MAX_PATH, L"%ls\\%ls_compressed.pdf", dir, base);
+    p->ctx->progressPercent = 30;
+    p->ctx->jobProgress = 30;
+    swprintf(p->ctx->progressStatusText, 128, L"Compressing PDF streams...");
+    wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
+
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
+    Magify_GetSafeOutputPath(p->srcPath, L"compressed", L".pdf", p->ctx->overwriteInPlace, outPath, tmpPath);
+    const WCHAR *target = p->ctx->overwriteInPlace ? tmpPath : outPath;
 
     int pct = 0;
-    BOOL ok = Magify_PdfCompressSync(p->srcPath, outPath, p->intParam, &pct);
+    BOOL ok = Magify_PdfCompressSync(p->srcPath, target, p->intParam, &pct);
     if (ok) {
-        WCHAR szOrig[32], szNew[32];
-        Magify_FormatFileSize(Magify_GetFileSize(p->srcPath), szOrig, 32);
-        Magify_FormatFileSize(Magify_GetFileSize(outPath), szNew, 32);
-        swprintf(p->ctx->statusText, 128, L"Compressed PDF -%d%% (%ls -> %ls)", pct, szOrig, szNew);
+        Magify_FinalizeOutputFile(p->srcPath, tmpPath, outPath, p->ctx->overwriteInPlace, p->ctx);
+        uint64_t origSz = p->ctx->originalTotalBytes;
+        uint64_t newSz = p->ctx->finalTotalBytes;
+        Magify_FormatSizeDelta(origSz, newSz, p->ctx->progressStatusText, 128);
+        wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
     } else {
+        p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Compression failed");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     }
 
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(500);
     free(p);
     return 0;
 }
@@ -1690,8 +1722,13 @@ static DWORD WINAPI WorkerConvertToImages(void *arg) {
     }
 
     for (int i = 0; i < doc->pageCount; i++) {
-        p->ctx->jobProgress = (i * 100) / doc->pageCount;
+        if (p->ctx->cancelRequested) break;
+
+        int pct = (i * 100) / doc->pageCount;
+        p->ctx->jobProgress = pct;
+        p->ctx->progressPercent = pct;
         swprintf(p->ctx->statusText, 128, L"Rendering page %d of %d...", i + 1, doc->pageCount);
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
         if (pagePixels && Magify_PdfDoc_RenderThumbnail(doc, i, pageW, pageH, pagePixels)) {
             GpBitmap *pBmp = NULL;
@@ -1708,8 +1745,9 @@ static DWORD WINAPI WorkerConvertToImages(void *arg) {
     Magify_PdfDoc_Close(doc);
 
     swprintf(p->ctx->statusText, 128, L"Exported %ls pages to %ls_pages", ext, base);
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(500);
     free(p);
     return 0;
 }
@@ -1720,6 +1758,7 @@ BOOL Magify_PdfConvertToImages(MagifyContext *ctx, const WCHAR *format) {
     if (!p) return FALSE;
     p->ctx = ctx;
     wcsncpy(p->srcPath, ctx->files[0], MAX_PATH - 1);
+    p->paramStr[0] = L'\0';
     wcsncpy(p->paramStr, (format && format[0]) ? format : L"JPG", 63);
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)WorkerConvertToImages, p);
     return TRUE;
@@ -1727,20 +1766,26 @@ BOOL Magify_PdfConvertToImages(MagifyContext *ctx, const WCHAR *format) {
 
 static DWORD WINAPI WorkerExtractText(void *arg) {
     PdfWorkerParam *p = (PdfWorkerParam*)arg;
-    WCHAR outPath[MAX_PATH];
-    WCHAR dir[MAX_PATH], base[MAX_PATH];
-    wcsncpy(dir, p->srcPath, MAX_PATH - 1);
-    PathRemoveFileSpecW(dir);
-    wcsncpy(base, PathFindFileNameW(p->srcPath), MAX_PATH - 1);
-    PathRemoveExtensionW(base);
-    swprintf(outPath, MAX_PATH, L"%ls\\%ls_text.txt", dir, base);
+    p->ctx->progressPercent = 30;
+    p->ctx->jobProgress = 30;
+    swprintf(p->ctx->progressStatusText, 128, L"Extracting text...");
+    wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
+
+    WCHAR outPath[MAX_PATH], tmpPath[MAX_PATH];
+    Magify_GetSafeOutputPath(p->srcPath, L"text", L".txt", FALSE, outPath, tmpPath);
 
     BOOL ok = Magify_PdfExtractTextSync(p->srcPath, outPath);
-    if (ok) swprintf(p->ctx->statusText, 128, L"Extracted text to %ls", PathFindFileNameW(outPath));
-    else swprintf(p->ctx->statusText, 128, L"Text extraction failed");
+    if (ok) {
+        p->ctx->finalTotalBytes = Magify_GetFileSize(outPath);
+        swprintf(p->ctx->statusText, 128, L"Extracted text to %ls", PathFindFileNameW(outPath));
+    } else {
+        p->ctx->isErrorState = TRUE;
+        swprintf(p->ctx->statusText, 128, L"Text extraction failed");
+    }
 
+    wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
+    p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
-    Sleep(500);
     free(p);
     return 0;
 }

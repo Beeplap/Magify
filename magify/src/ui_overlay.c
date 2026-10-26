@@ -632,9 +632,13 @@ static void RenderRadialMenu(MagifyContext *ctx) {
     float globalAlpha = ctx->isClosing ? (1.0f - ctx->closeProgress) : ClampFloat(t * 1.5f, 0.0f, 1.0f);
     if (globalAlpha <= 0.001f) return;
 
-    float hubRadius = 50.0f * animScale;
+    // Center Hub smooth expansion when processing
+    float hubTarget = (ctx->uiState == UI_STATE_PROCESSING) ? 1.0f : 0.0f;
+    ctx->hubExpandAnim += (hubTarget - ctx->hubExpandAnim) * 0.28f;
+    float hubRadius = (50.0f + 24.0f * ctx->hubExpandAnim) * animScale;
     float innerRadius = 56.0f * animScale;
     float baseOuterRadius = 142.0f * animScale;
+    float slicesAlpha = (1.0f - ctx->hubExpandAnim);
 
     int sliceCount = 4;
     float rotOffset = 225.0f;
@@ -649,8 +653,8 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         float target = (ctx->hoveredSlice == i) ? 1.0f : 0.0f;
         g_sliceHover[i] += (target - g_sliceHover[i]) * 0.28f;
     }
-    float hubTarget = (ctx->hoveredSlice == -1) ? 1.0f : 0.0f;
-    g_hubHover += (hubTarget - g_hubHover) * 0.28f;
+    float hubHoverTarget = (ctx->hoveredSlice == -1) ? 1.0f : 0.0f;
+    g_hubHover += (hubHoverTarget - g_hubHover) * 0.28f;
 
     for (int y = 0; y < g_surfHeight; y++) {
         float dy = (float)y - cy;
@@ -660,10 +664,61 @@ static void RenderRadialMenu(MagifyContext *ctx) {
 
             if (dist > (baseOuterRadius + 18.0f) + 2.0f) continue;
 
-            // Center Hub
+            // Center Hub & Circular Progress Ring
             if (dist <= hubRadius + 1.5f) {
                 float d = hubRadius - dist;
                 float cov = ClampFloat(d + 0.5f, 0.0f, 1.0f);
+
+                if (ctx->hubExpandAnim > 0.05f) {
+                    // Processing / Success / Error circular progress ring
+                    float ringThick = 9.0f * animScale;
+                    float ringInner = hubRadius - ringThick;
+
+                    if (dist >= ringInner - 1.0f && dist <= hubRadius + 1.0f) {
+                        float ringMid = (ringInner + hubRadius) * 0.5f;
+                        float dRing = (ringThick * 0.5f) - fabsf(dist - ringMid);
+                        float covRing = ClampFloat(dRing + 0.5f, 0.0f, 1.0f);
+
+                        float angleDeg = atan2f(dy, dx) * (180.0f / MAGIFY_PI);
+                        if (angleDeg < 0.0f) angleDeg += 360.0f;
+                        float relAngle = fmodf(angleDeg - 270.0f + 360.0f, 360.0f);
+
+                        float pct = (float)ctx->progressPercent / 100.0f;
+                        if (pct < 0.05f && !ctx->isSuccessState && !ctx->isErrorState) pct = 0.05f;
+                        float maxAngle = pct * 360.0f;
+
+                        if (ctx->isErrorState) {
+                            uint8_t a = (uint8_t)(255.0f * covRing * globalAlpha);
+                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 244, 63, 94);
+                            continue;
+                        } else if (ctx->isSuccessState) {
+                            uint8_t a = (uint8_t)(255.0f * covRing * globalAlpha);
+                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 16, 185, 129);
+                            continue;
+                        } else if (relAngle <= maxAngle) {
+                            // Rotating gradient sweep: Electric Violet (#7C3AED) -> Cyber Cyan (#22D3EE)
+                            float tGrad = relAngle / 360.0f;
+                            uint8_t r = (uint8_t)(124.0f + (34.0f - 124.0f) * tGrad);
+                            uint8_t g = (uint8_t)(58.0f + (211.0f - 58.0f) * tGrad);
+                            uint8_t b = (uint8_t)(237.0f + (238.0f - 237.0f) * tGrad);
+                            uint8_t a = (uint8_t)(255.0f * covRing * globalAlpha);
+                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, r, g, b);
+                            continue;
+                        } else {
+                            // Track background
+                            uint8_t a = (uint8_t)(90.0f * covRing * globalAlpha);
+                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 30, 41, 59);
+                            continue;
+                        }
+                    }
+
+                    // Interior background
+                    uint8_t a = (uint8_t)(245.0f * cov * globalAlpha);
+                    g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 18, 19, 26);
+                    continue;
+                }
+
+                // Normal Hub
                 uint8_t r = 18, g = 19, b = 26;
                 uint8_t a = (uint8_t)(235.0f * cov * globalAlpha);
 
@@ -688,7 +743,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
             }
 
             // Radial Slices
-            if (dist >= innerRadius - 1.5f) {
+            if (dist >= innerRadius - 1.5f && slicesAlpha > 0.01f) {
                 float angleDeg = atan2f(dy, dx) * (180.0f / MAGIFY_PI);
                 if (angleDeg < 0.0f) angleDeg += 360.0f;
 
@@ -719,12 +774,12 @@ static void RenderRadialMenu(MagifyContext *ctx) {
                 radFactor = ClampFloat(radFactor, 0.0f, 1.0f);
 
                 uint8_t normR = 24, normG = 27, normB = 38;
-                uint8_t normA = (uint8_t)(228.0f * cov * globalAlpha);
+                uint8_t normA = (uint8_t)(228.0f * cov * globalAlpha * slicesAlpha);
 
                 uint8_t hovR = (uint8_t)(124.0f + (6.0f - 124.0f) * radFactor);
                 uint8_t hovG = (uint8_t)(58.0f + (182.0f - 58.0f) * radFactor);
                 uint8_t hovB = (uint8_t)(237.0f + (212.0f - 237.0f) * radFactor);
-                uint8_t hovA = (uint8_t)(245.0f * cov * globalAlpha);
+                uint8_t hovA = (uint8_t)(245.0f * cov * globalAlpha * slicesAlpha);
 
                 uint8_t r = (uint8_t)(normR + ((float)hovR - normR) * hAmount);
                 uint8_t g = (uint8_t)(normG + ((float)hovG - normG) * hAmount);
@@ -732,7 +787,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
                 uint8_t a = (uint8_t)(normA + ((float)hovA - normA) * hAmount);
 
                 if (hAmount > 0.1f && dOuter < 3.0f && dOuter >= -0.5f) {
-                    float edgeGlow = (1.0f - (dOuter / 3.0f)) * hAmount * globalAlpha;
+                    float edgeGlow = (1.0f - (dOuter / 3.0f)) * hAmount * globalAlpha * slicesAlpha;
                     r = (uint8_t)(r + (34 - r) * edgeGlow);
                     g = (uint8_t)(g + (211 - g) * edgeGlow);
                     b = (uint8_t)(b + (238 - b) * edgeGlow);
@@ -744,11 +799,20 @@ static void RenderRadialMenu(MagifyContext *ctx) {
     }
 
     // Center Hub Text
-    if (ctx->uiState == UI_STATE_PROCESSING) {
-        WCHAR progStr[32];
-        swprintf(progStr, 32, L"%d%%", (int)ctx->jobProgress);
-        DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, RGB(34, 211, 238), 20, FW_BOLD, globalAlpha, FALSE);
-        DrawCrispTextARGB(ctx->statusText, (int)cx, (int)cy + 14, RGB(148, 163, 184), 10, FW_NORMAL, globalAlpha, FALSE);
+    if (ctx->uiState == UI_STATE_PROCESSING || ctx->hubExpandAnim > 0.1f) {
+        if (ctx->isErrorState) {
+            DrawCrispTextARGB(L"✕ ERROR", (int)cx, (int)cy - 8, RGB(244, 63, 94), 14, FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)cy + 14, RGB(203, 213, 225), 9, FW_NORMAL, globalAlpha, FALSE);
+        } else if (ctx->isSuccessState) {
+            DrawCrispTextARGB(L"✓ COMPLETE", (int)cx, (int)cy - 8, RGB(16, 185, 129), 14, FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)cy + 14, RGB(248, 250, 252), 9, FW_BOLD, globalAlpha, FALSE);
+        } else {
+            WCHAR progStr[32];
+            swprintf(progStr, 32, L"%d%%", (int)ctx->progressPercent);
+            DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, RGB(255, 255, 255), 20, FW_BOLD, globalAlpha, FALSE);
+            const WCHAR *statusMsg = (ctx->progressStatusText[0] != L'\0') ? ctx->progressStatusText : ctx->statusText;
+            DrawCrispTextARGB(statusMsg, (int)cx, (int)cy + 14, RGB(34, 211, 238), 9, FW_NORMAL, globalAlpha, FALSE);
+        }
     } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
         DrawCrispTextARGB(L"← BACK", (int)cx, (int)cy - 6, RGB(34, 211, 238), 14, FW_BOLD, globalAlpha, FALSE);
         DrawCrispTextARGB(L"Click to return", (int)cx, (int)cy + 12, RGB(148, 163, 184), 9, FW_NORMAL, globalAlpha, FALSE);
@@ -886,6 +950,8 @@ void Magify_CloseOverlay(MagifyContext *ctx) {
 }
 
 static void ExecuteAction(MagifyContext *ctx, int slice) {
+    ctx->overwriteInPlace = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+
     if (ctx->uiState == UI_STATE_RADIAL_ROOT) {
         if (slice == 0) { // CONVERT
             ctx->uiState = UI_STATE_RADIAL_SUB;
@@ -1775,6 +1841,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 ExecuteAction(ctx, ctx->hoveredSlice);
                 RenderFrame(ctx);
             } else if (ctx->hoveredSlice == -2) {
+                if (ctx->uiState == UI_STATE_PROCESSING) {
+                    Magify_CancelWorker(ctx);
+                }
                 Magify_CloseOverlay(ctx);
             }
             return 0;
@@ -1950,6 +2019,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             }
 
             if (wParam == VK_ESCAPE) {
+                if (ctx->uiState == UI_STATE_PROCESSING) {
+                    Magify_CancelWorker(ctx);
+                    Magify_CloseOverlay(ctx);
+                    return 0;
+                }
                 if (ctx->uiState == UI_STATE_RADIAL_SUB) {
                     ctx->uiState = UI_STATE_RADIAL_ROOT;
                     ctx->activeSubmenu = SUBMENU_NONE;
@@ -1979,6 +2053,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         }
 
         case WM_DESTROY: {
+            if (ctx) Magify_CancelWorker(ctx);
             if (ctx && ctx->pdfOrganizer) {
                 Magify_PdfOrganizer_Free((MagifyPdfOrganizerState*)ctx->pdfOrganizer);
                 ctx->pdfOrganizer = NULL;

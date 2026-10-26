@@ -122,22 +122,182 @@ static unsigned __stdcall WorkerWrapper(void *param) {
         wp->func(wp->arg);
     }
     if (wp && wp->ctx) {
-        Sleep(500); // Allow user to see final completion status
-        wp->ctx->uiState = UI_STATE_CLOSING;
+        MagifyContext *ctx = wp->ctx;
+        if (!ctx->cancelRequested) {
+            if (ctx->isErrorState) {
+                // Keep error ring visible for 1.2s
+                Sleep(1200);
+                ctx->uiState = UI_STATE_CLOSING;
+            } else {
+                ctx->progressPercent = 100;
+                ctx->jobProgress = 100;
+                ctx->isSuccessState = TRUE;
+                ctx->completionTick = GetTickCount();
+
+                // Format toast size-savings report if applicable
+                if (ctx->originalTotalBytes > 0 && ctx->finalTotalBytes > 0 &&
+                    !wcsstr(ctx->progressStatusText, L"→")) {
+                    Magify_FormatSizeDelta(ctx->originalTotalBytes, ctx->finalTotalBytes,
+                                           ctx->progressStatusText, 128);
+                    wcsncpy(ctx->statusText, ctx->progressStatusText, 127);
+                }
+
+                // 350ms success checkmark + total 750ms before smooth dismiss
+                Sleep(750);
+                ctx->uiState = UI_STATE_CLOSING;
+            }
+        } else {
+            ctx->uiState = UI_STATE_CLOSING;
+        }
+        ctx->isProcessing = 0;
+        if (ctx->hWorkerThread) {
+            CloseHandle(ctx->hWorkerThread);
+            ctx->hWorkerThread = NULL;
+        }
     }
     free(wp);
     return 0;
 }
 
 void Magify_LaunchWorker(MagifyContext *ctx, LPTHREAD_START_ROUTINE func, void *arg) {
+    if (!ctx) return;
     WorkerParam *wp = (WorkerParam*)malloc(sizeof(WorkerParam));
     if (!wp) return;
     wp->ctx = ctx;
     wp->func = func;
     wp->arg = arg;
-    ctx->uiState = UI_STATE_PROCESSING;
+
+    // Capture initial file size
+    ctx->originalTotalBytes = 0;
+    for (int i = 0; i < ctx->fileCount; i++) {
+        ctx->originalTotalBytes += Magify_GetFileSize(ctx->files[i]);
+    }
+    ctx->finalTotalBytes = 0;
+
+    ctx->isProcessing = 1;
+    ctx->cancelRequested = 0;
+    ctx->isSuccessState = FALSE;
+    ctx->isErrorState = FALSE;
+    ctx->progressPercent = 0;
     ctx->jobProgress = 0;
-    _beginthreadex(NULL, 0, WorkerWrapper, wp, 0, NULL);
+    ctx->uiState = UI_STATE_PROCESSING;
+
+    uintptr_t th = _beginthreadex(NULL, 0, WorkerWrapper, wp, 0, NULL);
+    ctx->hWorkerThread = (HANDLE)th;
+}
+
+void Magify_CancelWorker(MagifyContext *ctx) {
+    if (!ctx) return;
+    ctx->cancelRequested = 1;
+    if (ctx->hWorkerThread) {
+        WaitForSingleObject(ctx->hWorkerThread, 150);
+        CloseHandle(ctx->hWorkerThread);
+        ctx->hWorkerThread = NULL;
+    }
+    ctx->isProcessing = 0;
+}
+
+BOOL Magify_GetSafeOutputPath(const WCHAR *srcPath, const WCHAR *suffix, const WCHAR *newExt,
+                              BOOL overwriteInPlace, WCHAR *outPath, WCHAR *tempPath) {
+    if (!srcPath || !outPath) return FALSE;
+
+    WCHAR dir[MAX_PATH];
+    wcsncpy(dir, srcPath, MAX_PATH - 1);
+    dir[MAX_PATH - 1] = L'\0';
+    PathRemoveFileSpecW(dir);
+
+    WCHAR base[MAX_PATH];
+    wcsncpy(base, PathFindFileNameW(srcPath), MAX_PATH - 1);
+    base[MAX_PATH - 1] = L'\0';
+    PathRemoveExtensionW(base);
+
+    const WCHAR *ext = (newExt && newExt[0]) ? newExt : PathFindExtensionW(srcPath);
+    WCHAR dotExt[32];
+    if (ext[0] != L'.') {
+        swprintf(dotExt, 32, L".%ls", ext);
+        ext = dotExt;
+    }
+
+    if (overwriteInPlace) {
+        if (tempPath) {
+            swprintf(tempPath, MAX_PATH, L"%ls\\temp_magify_%u_%u.tmp",
+                     dir, (unsigned)GetCurrentProcessId(), (unsigned)GetTickCount());
+            wcsncpy(outPath, tempPath, MAX_PATH - 1);
+        } else {
+            wcsncpy(outPath, srcPath, MAX_PATH - 1);
+        }
+        return TRUE;
+    }
+
+    if (tempPath) tempPath[0] = L'\0';
+
+    const WCHAR *sfx = (suffix && suffix[0]) ? suffix : L"magify";
+    swprintf(outPath, MAX_PATH, L"%ls\\%ls_%ls%ls", dir, base, sfx, ext);
+
+    // If file already exists, find non-colliding index _2, _3...
+    if (GetFileAttributesW(outPath) != INVALID_FILE_ATTRIBUTES) {
+        for (int i = 2; i <= 999; i++) {
+            swprintf(outPath, MAX_PATH, L"%ls\\%ls_%ls_%d%ls", dir, base, sfx, i, ext);
+            if (GetFileAttributesW(outPath) == INVALID_FILE_ATTRIBUTES) {
+                break;
+            }
+        }
+    }
+    return TRUE;
+}
+
+BOOL Magify_FinalizeOutputFile(const WCHAR *originalPath, const WCHAR *tempPath, const WCHAR *finalPath,
+                              BOOL overwriteInPlace, MagifyContext *ctx) {
+    if (overwriteInPlace) {
+        if (!tempPath || tempPath[0] == L'\0') return TRUE;
+
+        DWORD attrs = GetFileAttributesW(originalPath);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY)) {
+            SetFileAttributesW(originalPath, attrs & ~FILE_ATTRIBUTE_READONLY);
+        }
+
+        BOOL ok = MoveFileExW(tempPath, originalPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        if (!ok) {
+            ok = CopyFileW(tempPath, originalPath, FALSE);
+            DeleteFileW(tempPath);
+        }
+
+        if (!ok) {
+            if (ctx) {
+                ctx->isErrorState = TRUE;
+                swprintf(ctx->progressStatusText, 128, L"Error: File is locked by another app");
+                wcsncpy(ctx->statusText, ctx->progressStatusText, 127);
+            }
+            return FALSE;
+        }
+
+        if (ctx) {
+            ctx->finalTotalBytes = Magify_GetFileSize(originalPath);
+        }
+        return TRUE;
+    } else {
+        if (ctx) {
+            ctx->finalTotalBytes = Magify_GetFileSize(finalPath);
+        }
+        return TRUE;
+    }
+}
+
+void Magify_FormatSizeDelta(uint64_t origBytes, uint64_t finalBytes, WCHAR *outStr, size_t maxLen) {
+    if (!outStr || maxLen == 0) return;
+
+    WCHAR szOrig[32], szFinal[32];
+    Magify_FormatFileSize(origBytes, szOrig, 32);
+    Magify_FormatFileSize(finalBytes, szFinal, 32);
+
+    if (origBytes > 0 && finalBytes < origBytes) {
+        int pct = (int)((1.0 - (double)finalBytes / (double)origBytes) * 100.0);
+        swprintf(outStr, maxLen, L"%ls → %ls (-%d%%)", szOrig, szFinal, pct);
+    } else if (finalBytes > 0) {
+        swprintf(outStr, maxLen, L"%ls → %ls", szOrig, szFinal);
+    } else {
+        swprintf(outStr, maxLen, L"Saved successfully!");
+    }
 }
 
 BOOL Magify_RenameFiles(MagifyContext *ctx, const WCHAR *newBaseName) {
@@ -165,11 +325,19 @@ BOOL Magify_RenameFiles(MagifyContext *ctx, const WCHAR *newBaseName) {
         if (MoveFileExW(oldPath, newPath, MOVEFILE_COPY_ALLOWED)) {
             wcsncpy(ctx->files[0], newPath, MAX_PATH - 1);
             swprintf(ctx->statusText, 128, L"Renamed to %ls%ls", newBaseName, ext);
+            wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
+            ctx->isSuccessState = TRUE;
             ctx->uiState = UI_STATE_CLOSING;
             return TRUE;
         } else {
             DWORD err = GetLastError();
-            swprintf(ctx->statusText, 128, L"Rename failed (Error %lu)", (unsigned long)err);
+            if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
+                swprintf(ctx->statusText, 128, L"Error: File is locked by another app");
+            } else {
+                swprintf(ctx->statusText, 128, L"Rename failed (Error %lu)", (unsigned long)err);
+            }
+            wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
+            ctx->isErrorState = TRUE;
             return FALSE;
         }
     }
@@ -193,7 +361,14 @@ BOOL Magify_RenameFiles(MagifyContext *ctx, const WCHAR *newBaseName) {
         }
     }
 
-    swprintf(ctx->statusText, 128, L"Batch renamed %d of %d files", renamedCount, ctx->fileCount);
+    if (renamedCount == ctx->fileCount) {
+        swprintf(ctx->statusText, 128, L"Batch renamed %d files", renamedCount);
+        ctx->isSuccessState = TRUE;
+    } else {
+        swprintf(ctx->statusText, 128, L"Batch renamed %d of %d files (some locked)", renamedCount, ctx->fileCount);
+        ctx->isErrorState = TRUE;
+    }
+    wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
     ctx->uiState = UI_STATE_CLOSING;
     return (renamedCount > 0);
 }
@@ -397,9 +572,13 @@ BOOL Magify_CreateZipArchive(MagifyContext *ctx, const WCHAR *outputZipPath) {
     CloseHandle(hZip);
 
     uint64_t zipSz = Magify_GetFileSize(outputZipPath);
+    ctx->finalTotalBytes = zipSz;
+    ctx->progressPercent = 100;
+    ctx->jobProgress = 100;
     WCHAR szStr[32];
     Magify_FormatFileSize(zipSz, szStr, 32);
     swprintf(ctx->statusText, 128, L"Created ZIP archive (%ls)", szStr);
+    wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
     return TRUE;
 }
 
@@ -411,12 +590,17 @@ typedef struct {
 static DWORD WINAPI GenericZipWorkerThread(void *arg) {
     ZipWorkerArg *zwa = (ZipWorkerArg*)arg;
     for (int p = 0; p <= 60; p += 20) {
+        if (zwa->ctx->cancelRequested) {
+            free(zwa);
+            return 0;
+        }
         zwa->ctx->jobProgress = p;
-        swprintf(zwa->ctx->statusText, 128, L"Creating ZIP archive (%d%%)...", p);
+        zwa->ctx->progressPercent = p;
+        swprintf(zwa->ctx->progressStatusText, 128, L"Creating ZIP archive (%d%%)...", p);
+        wcsncpy(zwa->ctx->statusText, zwa->ctx->progressStatusText, 127);
         Sleep(30);
     }
     Magify_CreateZipArchive(zwa->ctx, zwa->outZipPath);
-    zwa->ctx->jobProgress = 100;
     free(zwa);
     return 0;
 }
@@ -429,17 +613,7 @@ void Magify_CompressGenericZip(MagifyContext *ctx) {
     zwa->ctx = ctx;
 
     const WCHAR *firstFile = ctx->files[0];
-    WCHAR dir[MAX_PATH];
-    wcsncpy(dir, firstFile, MAX_PATH - 1);
-    dir[MAX_PATH - 1] = L'\0';
-    PathRemoveFileSpecW(dir);
-
-    WCHAR baseName[MAX_PATH];
-    wcsncpy(baseName, PathFindFileNameW(firstFile), MAX_PATH - 1);
-    baseName[MAX_PATH - 1] = L'\0';
-    PathRemoveExtensionW(baseName);
-
-    swprintf(zwa->outZipPath, MAX_PATH, L"%ls\\%ls_magify.zip", dir, baseName);
+    Magify_GetSafeOutputPath(firstFile, L"magify", L".zip", FALSE, zwa->outZipPath, NULL);
 
     Magify_LaunchWorker(ctx, (LPTHREAD_START_ROUTINE)GenericZipWorkerThread, zwa);
 }

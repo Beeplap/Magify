@@ -62,8 +62,22 @@ typedef struct {
     float           animProgress;       // 0.0f -> 1.0f spring value
     float           closeProgress;      // 0.0f -> 1.0f during closing
     BOOL            isClosing;
-    volatile LONG   jobProgress;        // 0..100 for background thread
-    WCHAR           statusText[128];
+
+    // Background Worker Thread & Progress State
+    HANDLE          hWorkerThread;
+    volatile LONG   isProcessing;       // 0 = idle, 1 = working
+    volatile LONG   progressPercent;    // 0..100 for background thread
+    volatile LONG   jobProgress;        // compatibility mirror
+    WCHAR           progressStatusText[128];
+    WCHAR           statusText[128];    // compatibility mirror
+    uint64_t        originalTotalBytes;
+    uint64_t        finalTotalBytes;
+    BOOL            overwriteInPlace;   // Shift+Click was held
+    volatile LONG   cancelRequested;    // 1 = cancel requested
+    BOOL            isSuccessState;
+    BOOL            isErrorState;
+    DWORD           completionTick;
+    float           hubExpandAnim;      // 0.0f -> 1.0f for center hub expansion
 
     // Rename HUD buffer & state
     WCHAR           renameBuf[MAX_PATH];
