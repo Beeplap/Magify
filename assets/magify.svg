@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <linearGradient id="magGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#22D3EE" />
+      <stop offset="50%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#EC4899" />
+    </linearGradient>
+    <linearGradient id="darkCore" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1E1B4B" />
+      <stop offset="100%" stop-color="#0F172A" />
+    </linearGradient>
+  </defs>
+  <!-- Rounded Squircle Badge for Windows Context Menu Visibility -->
+  <rect x="16" y="16" width="224" height="224" rx="52" fill="url(#darkCore)" stroke="url(#magGrad)" stroke-width="10"/>
+  <!-- Document / PDF Fold inside Lens -->
+  <path d="M82 68 H130 L154 92 V156 C154 162.6 148.6 168 142 168 H82 C75.4 168 70 162.6 70 156 V80 C70 73.4 75.4 68 82 68 Z" fill="#1E293B" stroke="#22D3EE" stroke-width="6"/>
+  <path d="M130 68 V92 H154" fill="none" stroke="#22D3EE" stroke-width="6" stroke-linejoin="round"/>
+  <!-- Glowing Lens Ring -->
+  <circle cx="114" cy="118" r="58" fill="none" stroke="url(#magGrad)" stroke-width="16" />
+  <!-- Image Sparkle / Crop Star inside Lens -->
+  <path d="M104 102 L110 116 L124 122 L110 128 L104 142 L98 128 L84 122 L98 116 Z" fill="#F8FAFC"/>
+  <!-- Magnifier Handle -->
+  <path d="M158 162 L202 206" stroke="url(#magGrad)" stroke-width="22" stroke-linecap="round"/>
+</svg>

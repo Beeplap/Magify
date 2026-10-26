@@ -1,0 +1,7 @@
+#include <windows.h>
+
+#define IDI_MAGIFY_ICON 101
+
+IDI_MAGIFY_ICON ICON "assets/magify.ico"
+
+1 24 "assets/magify.manifest"
