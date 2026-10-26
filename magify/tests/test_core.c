@@ -613,6 +613,14 @@ int wmain(void) {
     ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\Magify\\magify.exe", localApp, MAX_PATH);
     DWORD attr = GetFileAttributesW(localApp);
     BOOL exeExists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+
+    if (!exeExists) {
+        printf("  Magify not pre-installed on this runner. Executing setup.bat to test installation...\n");
+        system("cmd.exe /c setup.bat >nul 2>nul");
+        attr = GetFileAttributesW(localApp);
+        exeExists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+    }
+
     printf("  Installed binary check: %ls -> %s\n", localApp, exeExists ? "FOUND" : "NOT FOUND");
     assert(exeExists);
 

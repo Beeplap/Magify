@@ -1,0 +1,73 @@
+name: Release Magify
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2 / MinGW-w64 Toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-make
+            make
+
+      - name: Build Magify & Run Automated Tests
+        shell: msys2 {0}
+        run: |
+          cd magify
+          mkdir -p build
+          make clean
+          make all
+          make test
+          cd ..
+          mkdir -p build
+          cp -f magify/build/magify.exe build/magify.exe
+          cp -f magify/build/test_core.exe build/test_core.exe
+
+      - name: Package Distribution Archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "dist/Magify" -Force | Out-Null
+          Copy-Item "build/magify.exe" -Destination "dist/Magify/magify.exe"
+          Copy-Item "setup.bat" -Destination "dist/Magify/setup.bat"
+          if (Test-Path "magify/assets/magify.ico") {
+            New-Item -ItemType Directory -Path "dist/Magify/assets" -Force | Out-Null
+            Copy-Item "magify/assets/magify.ico" -Destination "dist/Magify/assets/magify.ico"
+          }
+          if (Test-Path "README.md") {
+            Copy-Item "README.md" -Destination "dist/Magify/README.md"
+          }
+          if (Test-Path "LICENSE") {
+            Copy-Item "LICENSE" -Destination "dist/Magify/LICENSE"
+          }
+          Compress-Archive -Path "dist/Magify/*" -DestinationPath "Magify-v1.0-Windows-x64.zip" -Force
+          Get-Item "Magify-v1.0-Windows-x64.zip" | Select-Object Name, Length
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: Magify-v1.0-Windows-x64.zip
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
