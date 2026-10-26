@@ -118,7 +118,8 @@ static void LaunchTestOverlay(MagifyFileClass fileClass) {
 static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
-            BOOL dark = TRUE;
+            BOOL isLight = Magify_IsSystemLightTheme();
+            BOOL dark = !isLight;
             DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark, sizeof(dark));
 
             CreateWindowW(L"BUTTON", L"Toggle Menu",
@@ -156,16 +157,25 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
                 }
                 return TRUE;
             } else if (dis->CtlID == BTN_TEST_IMAGE) {
+                BOOL isLight = Magify_IsSystemLightTheme();
                 DrawPillButton(dis, L"Test Radial (Image)",
-                               RGB(30, 41, 59), RGB(34, 211, 238), RGB(51, 65, 85));
+                               isLight ? RGB(226, 232, 240) : RGB(30, 41, 59),
+                               isLight ? RGB(8, 145, 178) : RGB(34, 211, 238),
+                               isLight ? RGB(203, 213, 225) : RGB(51, 65, 85));
                 return TRUE;
             } else if (dis->CtlID == BTN_TEST_PDF) {
+                BOOL isLight = Magify_IsSystemLightTheme();
                 DrawPillButton(dis, L"Test Radial (PDF)",
-                               RGB(30, 41, 59), RGB(168, 85, 247), RGB(51, 65, 85));
+                               isLight ? RGB(226, 232, 240) : RGB(30, 41, 59),
+                               isLight ? RGB(109, 40, 217) : RGB(168, 85, 247),
+                               isLight ? RGB(203, 213, 225) : RGB(51, 65, 85));
                 return TRUE;
             } else if (dis->CtlID == BTN_CLOSE) {
+                BOOL isLight = Magify_IsSystemLightTheme();
                 DrawPillButton(dis, L"Close",
-                               RGB(24, 27, 38), RGB(148, 163, 184), RGB(39, 45, 62));
+                               isLight ? RGB(241, 245, 249) : RGB(24, 27, 38),
+                               isLight ? RGB(71, 85, 105) : RGB(148, 163, 184),
+                               isLight ? RGB(203, 213, 225) : RGB(39, 45, 62));
                 return TRUE;
             }
             break;
@@ -194,18 +204,20 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
 
+            BOOL isLight = Magify_IsSystemLightTheme();
+
             RECT clientRc;
             GetClientRect(hwnd, &clientRc);
             FillRect(hdc, &clientRc, g_hBrushBg);
 
             // Title & Header
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(34, 211, 238));
+            SetTextColor(hdc, isLight ? RGB(8, 145, 178) : RGB(34, 211, 238));
             HGDIOBJ oldFont = SelectObject(hdc, g_hFontTitle);
             RECT titleRc = { 36, 28, 470, 60 };
             DrawTextW(hdc, L"MAGIFY", -1, &titleRc, DT_LEFT | DT_SINGLELINE);
 
-            SetTextColor(hdc, RGB(148, 163, 184));
+            SetTextColor(hdc, isLight ? RGB(71, 85, 105) : RGB(148, 163, 184));
             SelectObject(hdc, g_hFontSmall);
             RECT subRc = { 36, 60, 470, 80 };
             DrawTextW(hdc, L"120fps Instant Radial Utilities for Images & PDFs", -1, &subRc, DT_LEFT | DT_SINGLELINE);
@@ -213,7 +225,7 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             // Card background for registration status
             RECT cardRc = { 36, 92, 468, 155 };
             HGDIOBJ oldBrush = SelectObject(hdc, g_hBrushCard);
-            HPEN hPen = CreatePen(PS_SOLID, 1, RGB(51, 65, 85));
+            HPEN hPen = CreatePen(PS_SOLID, 1, isLight ? RGB(203, 213, 225) : RGB(51, 65, 85));
             HGDIOBJ oldPen = SelectObject(hdc, hPen);
             RoundRect(hdc, cardRc.left, cardRc.top, cardRc.right, cardRc.bottom, 12, 12);
             SelectObject(hdc, oldBrush);
@@ -224,7 +236,7 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             RECT statRc = { 52, 104, 452, 126 };
             SelectObject(hdc, g_hFontNormal);
             if (reg) {
-                SetTextColor(hdc, RGB(16, 185, 129));
+                SetTextColor(hdc, isLight ? RGB(5, 150, 105) : RGB(16, 185, 129));
                 DrawTextW(hdc, L"● Context Menu: Active (Right-click any file)", -1, &statRc, DT_LEFT | DT_SINGLELINE);
             } else {
                 SetTextColor(hdc, RGB(244, 63, 94));
@@ -233,7 +245,7 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
             RECT descRc = { 52, 128, 452, 148 };
             SelectObject(hdc, g_hFontSmall);
-            SetTextColor(hdc, RGB(148, 163, 184));
+            SetTextColor(hdc, isLight ? RGB(71, 85, 105) : RGB(148, 163, 184));
             DrawTextW(hdc, reg ? L"Select one or multiple files in Explorer to open radial overlay."
                                : L"Click below to register into Windows Explorer right-click menu.",
                       -1, &descRc, DT_LEFT | DT_SINGLELINE);
@@ -252,8 +264,14 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 }
 
 static void ShowDashboard(HINSTANCE hInst) {
-    g_hBrushBg = CreateSolidBrush(RGB(18, 19, 26));     // Deep Obsidian #12131A
-    g_hBrushCard = CreateSolidBrush(RGB(26, 29, 42));   // Card fill #1A1D2A
+    BOOL isLight = Magify_IsSystemLightTheme();
+    if (isLight) {
+        g_hBrushBg = CreateSolidBrush(RGB(248, 250, 252));     // Slate 50 #F8FAFC
+        g_hBrushCard = CreateSolidBrush(RGB(241, 245, 249));   // Slate 100 #F1F5F9
+    } else {
+        g_hBrushBg = CreateSolidBrush(RGB(18, 19, 26));     // Deep Obsidian #12131A
+        g_hBrushCard = CreateSolidBrush(RGB(26, 29, 42));   // Card fill #1A1D2A
+    }
     CreateDashboardFonts();
 
     WNDCLASSEXW wc = {0};

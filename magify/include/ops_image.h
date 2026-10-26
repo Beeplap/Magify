@@ -106,4 +106,9 @@ BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, Ma
 BOOL Magify_LoadImageDimensions(const WCHAR *srcPath, int *outW, int *outH);
 BOOL Magify_GeneratePreview(const WCHAR *srcPath, int targetW, int targetH, uint32_t *outPixels, int *actualW, int *actualH);
 
+// Native WIC Decoders & Image Loaders
+HRESULT Magify_WIC_DecodeToPixels(const WCHAR *filePath, uint32_t **outPixels, int *outW, int *outH);
+GpBitmap *Magify_Image_LoadBitmap(const WCHAR *filePath, void **outPixelBuffer);
+void Magify_Image_FreeBitmap(GpBitmap *bmp, void *pixelBuffer);
+
 #endif // MAGIFY_OPS_IMAGE_H

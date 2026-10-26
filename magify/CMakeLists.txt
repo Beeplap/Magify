@@ -26,6 +26,7 @@ target_link_libraries(magify PRIVATE
     shell32
     ole32
     uuid
+    windowscodecs
     shlwapi
     dwmapi
     comctl32

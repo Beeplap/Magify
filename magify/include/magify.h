@@ -46,6 +46,28 @@ typedef enum {
 } MagifySubmenuType;
 
 typedef struct {
+    BOOL isLightMode;
+    // Hub
+    uint8_t hubBgR, hubBgG, hubBgB, hubBgA;
+    uint8_t hubBdrR, hubBdrG, hubBdrB;
+    // Slices normal
+    uint8_t sliceNormR, sliceNormG, sliceNormB, sliceNormA;
+    // Slices hover gradient
+    uint8_t sliceHovR1, sliceHovG1, sliceHovB1;
+    uint8_t sliceHovR2, sliceHovG2, sliceHovB2;
+    // Edge glow
+    uint8_t glowR, glowG, glowB;
+    // Track background
+    uint8_t trackR, trackG, trackB, trackA;
+    // Text colors (COLORREF)
+    COLORREF textPrimary;
+    COLORREF textSecondary;
+    COLORREF textAccent;
+    COLORREF cardBg;
+    COLORREF cardBorder;
+} MagifyThemePalette;
+
+typedef struct {
     HINSTANCE       hInstance;
     HWND            hwndOverlay;
     POINT           spawnCursor;        // Screen coordinates where right-click invoked
@@ -109,14 +131,19 @@ typedef struct {
     // PDF Organizer HUD state
     void           *pdfOrganizer;       // MagifyPdfOrganizerState*
 
+    // Theme palette
+    MagifyThemePalette themePalette;
+
     // Overlay surface geometry
     int             overlayWidth;
     int             overlayHeight;
 } MagifyContext;
 
-// Detection & formatting helpers
+// Detection, formatting & theme helpers
 MagifyFileClass Magify_DetectFileClass(const WCHAR *filePath);
 void Magify_FormatFileSize(uint64_t bytes, WCHAR *outStr, size_t maxLen);
 uint64_t Magify_GetFileSize(const WCHAR *filePath);
+BOOL Magify_IsSystemLightTheme(void);
+MagifyThemePalette Magify_GetActiveTheme(void);
 
 #endif // MAGIFY_H

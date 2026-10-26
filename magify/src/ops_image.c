@@ -1,7 +1,9 @@
+#define COBJMACROS
 #include "ops_image.h"
 #include "ops_common.h"
 #include <stdio.h>
 #include <shlwapi.h>
+#include <wincodec.h>
 
 static ULONG_PTR g_gdiplusToken = 0;
 static int g_gdiplusInitCount = 0;
@@ -24,6 +26,154 @@ void Magify_Image_Shutdown(void) {
     if (--g_gdiplusInitCount == 0 && g_gdiplusToken) {
         GdiplusShutdown(g_gdiplusToken);
         g_gdiplusToken = 0;
+    }
+}
+
+// -------------------------------------------------------------
+// Native WIC Hardware-Accelerated Decoders (HEIC, WebP, TIFF)
+// -------------------------------------------------------------
+HRESULT Magify_WIC_DecodeToPixels(const WCHAR *filePath, uint32_t **outPixels, int *outW, int *outH) {
+    if (!filePath || !outPixels || !outW || !outH) return E_POINTER;
+    *outPixels = NULL;
+    *outW = 0;
+    *outH = 0;
+
+    CoInitialize(NULL);
+
+    IWICImagingFactory *pFactory = NULL;
+    HRESULT hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                  &IID_IWICImagingFactory, (void**)&pFactory);
+    if (FAILED(hr) || !pFactory) return hr;
+
+    IWICBitmapDecoder *pDecoder = NULL;
+    hr = IWICImagingFactory_CreateDecoderFromFilename(
+        pFactory, filePath, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &pDecoder);
+    if (FAILED(hr) || !pDecoder) {
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    IWICBitmapFrameDecode *pFrame = NULL;
+    hr = IWICBitmapDecoder_GetFrame(pDecoder, 0, &pFrame);
+    if (FAILED(hr) || !pFrame) {
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    UINT w = 0, h = 0;
+    hr = IWICBitmapFrameDecode_GetSize(pFrame, &w, &h);
+    if (FAILED(hr) || w == 0 || h == 0) {
+        IWICBitmapFrameDecode_Release(pFrame);
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    IWICFormatConverter *pConverter = NULL;
+    hr = IWICImagingFactory_CreateFormatConverter(pFactory, &pConverter);
+    if (FAILED(hr) || !pConverter) {
+        IWICBitmapFrameDecode_Release(pFrame);
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    hr = IWICFormatConverter_Initialize(
+        pConverter, (IWICBitmapSource*)pFrame,
+        &GUID_WICPixelFormat32bppBGRA,
+        WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom);
+    if (FAILED(hr)) {
+        IWICFormatConverter_Release(pConverter);
+        IWICBitmapFrameDecode_Release(pFrame);
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    UINT stride = w * 4;
+    UINT bufSize = stride * h;
+    uint32_t *pixels = (uint32_t*)malloc(bufSize);
+    if (!pixels) {
+        IWICFormatConverter_Release(pConverter);
+        IWICBitmapFrameDecode_Release(pFrame);
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return E_OUTOFMEMORY;
+    }
+
+    hr = IWICFormatConverter_CopyPixels(pConverter, NULL, stride, bufSize, (BYTE*)pixels);
+    if (FAILED(hr)) {
+        free(pixels);
+        IWICFormatConverter_Release(pConverter);
+        IWICBitmapFrameDecode_Release(pFrame);
+        IWICBitmapDecoder_Release(pDecoder);
+        IWICImagingFactory_Release(pFactory);
+        return hr;
+    }
+
+    *outPixels = pixels;
+    *outW = (int)w;
+    *outH = (int)h;
+
+    IWICFormatConverter_Release(pConverter);
+    IWICBitmapFrameDecode_Release(pFrame);
+    IWICBitmapDecoder_Release(pDecoder);
+    IWICImagingFactory_Release(pFactory);
+    return S_OK;
+}
+
+GpBitmap *Magify_Image_LoadBitmap(const WCHAR *filePath, void **outPixelBuffer) {
+    if (outPixelBuffer) *outPixelBuffer = NULL;
+    if (!filePath || filePath[0] == L'\0') return NULL;
+
+    Magify_Image_Init();
+
+    GpBitmap *bmp = NULL;
+    const WCHAR *ext = PathFindExtensionW(filePath);
+    BOOL isModern = (_wcsicmp(ext, L".heic") == 0 ||
+                     _wcsicmp(ext, L".heif") == 0 ||
+                     _wcsicmp(ext, L".webp") == 0);
+
+    if (!isModern && GdipCreateBitmapFromFile(filePath, &bmp) == Ok && bmp) {
+        return bmp;
+    }
+
+    // Try WIC decoder for modern or unhandled formats
+    uint32_t *pixels = NULL;
+    int w = 0, h = 0;
+    if (SUCCEEDED(Magify_WIC_DecodeToPixels(filePath, &pixels, &w, &h)) && pixels && w > 0 && h > 0) {
+        if (GdipCreateBitmapFromScan0(w, h, w * 4, PixelFormat32bppARGB, (BYTE*)pixels, &bmp) == Ok && bmp) {
+            if (outPixelBuffer) {
+                *outPixelBuffer = pixels;
+                return bmp;
+            } else {
+                GpBitmap *cloned = NULL;
+                if (GdipCloneBitmapAreaI(0, 0, w, h, PixelFormat32bppARGB, bmp, &cloned) == Ok && cloned) {
+                    GdipDisposeImage(bmp);
+                    free(pixels);
+                    return cloned;
+                }
+                return bmp;
+            }
+        }
+        free(pixels);
+    }
+
+    // Fallback attempt
+    if (isModern && GdipCreateBitmapFromFile(filePath, &bmp) == Ok && bmp) {
+        return bmp;
+    }
+
+    return NULL;
+}
+
+void Magify_Image_FreeBitmap(GpBitmap *bmp, void *pixelBuffer) {
+    if (bmp) {
+        GdipDisposeImage(bmp);
+    }
+    if (pixelBuffer) {
+        free(pixelBuffer);
     }
 }
 
@@ -60,16 +210,49 @@ typedef struct {
 BOOL Magify_LoadImageDimensions(const WCHAR *srcPath, int *outW, int *outH) {
     Magify_Image_Init();
     GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromFile(srcPath, &bmp) != Ok || !bmp) return FALSE;
+    const WCHAR *ext = PathFindExtensionW(srcPath);
+    BOOL isModern = (_wcsicmp(ext, L".heic") == 0 ||
+                     _wcsicmp(ext, L".heif") == 0 ||
+                     _wcsicmp(ext, L".webp") == 0);
 
-    UINT w = 0, h = 0;
-    GdipGetImageWidth(bmp, &w);
-    GdipGetImageHeight(bmp, &h);
-    GdipDisposeImage(bmp);
+    if (!isModern && GdipCreateBitmapFromFile(srcPath, &bmp) == Ok && bmp) {
+        UINT w = 0, h = 0;
+        GdipGetImageWidth(bmp, &w);
+        GdipGetImageHeight(bmp, &h);
+        GdipDisposeImage(bmp);
+        *outW = (int)w;
+        *outH = (int)h;
+        return TRUE;
+    }
 
-    *outW = (int)w;
-    *outH = (int)h;
-    return TRUE;
+    // WIC dimension query fallback
+    CoInitialize(NULL);
+    IWICImagingFactory *pFactory = NULL;
+    if (SUCCEEDED(CoCreateInstance(&CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER,
+                                   &IID_IWICImagingFactory, (void**)&pFactory)) && pFactory) {
+        IWICBitmapDecoder *pDecoder = NULL;
+        if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename(
+                pFactory, srcPath, NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &pDecoder)) && pDecoder) {
+            IWICBitmapFrameDecode *pFrame = NULL;
+            if (SUCCEEDED(IWICBitmapDecoder_GetFrame(pDecoder, 0, &pFrame)) && pFrame) {
+                UINT w = 0, h = 0;
+                IWICBitmapFrameDecode_GetSize(pFrame, &w, &h);
+                IWICBitmapFrameDecode_Release(pFrame);
+                IWICBitmapDecoder_Release(pDecoder);
+                IWICImagingFactory_Release(pFactory);
+                if (w > 0 && h > 0) {
+                    *outW = (int)w;
+                    *outH = (int)h;
+                    return TRUE;
+                }
+                return FALSE;
+            }
+            IWICBitmapDecoder_Release(pDecoder);
+        }
+        IWICImagingFactory_Release(pFactory);
+    }
+
+    return FALSE;
 }
 
 static DWORD WINAPI ConvertWorker(void *arg) {
@@ -79,8 +262,9 @@ static DWORD WINAPI ConvertWorker(void *arg) {
     p->ctx->jobProgress = 20;
     swprintf(p->ctx->statusText, 128, L"Loading image...");
 
-    GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+    void *srcPixels = NULL;
+    GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!bmp) {
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         free(p);
         return 0;
@@ -229,12 +413,12 @@ static DWORD WINAPI ConvertWorker(void *arg) {
             swprintf(p->ctx->statusText, 128, L"Failed to create ICO");
         }
     } else if (_wcsicmp(p->formatOrAction, L"PDF") == 0) {
-        GdipDisposeImage(bmp);
+        Magify_Image_FreeBitmap(bmp, srcPixels);
         free(p);
         return 0;
     }
 
-    GdipDisposeImage(bmp);
+    Magify_Image_FreeBitmap(bmp, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -279,8 +463,9 @@ static DWORD WINAPI RotateWorker(void *arg) {
     swprintf(p->ctx->statusText, 128, L"Rotating %d°...", p->intParam);
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+    void *srcPixels = NULL;
+    GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!bmp) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -318,7 +503,7 @@ static DWORD WINAPI RotateWorker(void *arg) {
     }
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GdipDisposeImage(bmp);
+    Magify_Image_FreeBitmap(bmp, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
@@ -346,8 +531,9 @@ static DWORD WINAPI FlipWorker(void *arg) {
     swprintf(p->ctx->statusText, 128, L"Flipping image...");
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+    void *srcPixels = NULL;
+    GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!bmp) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -380,7 +566,7 @@ static DWORD WINAPI FlipWorker(void *arg) {
     }
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GdipDisposeImage(bmp);
+    Magify_Image_FreeBitmap(bmp, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
@@ -408,8 +594,9 @@ static DWORD WINAPI ResizeWorker(void *arg) {
     swprintf(p->ctx->statusText, 128, L"Resizing image...");
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GpBitmap *src = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &src) != Ok || !src) {
+    void *srcPixels = NULL;
+    GpBitmap *src = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!src) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -471,7 +658,7 @@ static DWORD WINAPI ResizeWorker(void *arg) {
 
     GdipDeleteGraphics(g);
     GdipDisposeImage(dst);
-    GdipDisposeImage(src);
+    Magify_Image_FreeBitmap(src, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
@@ -496,8 +683,9 @@ BOOL Magify_Image_Resize(const WCHAR *srcPath, int targetW, int targetH, int per
 BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, MagifyContext *ctx) {
     Magify_Image_Init();
 
-    GpBitmap *src = NULL;
-    if (GdipCreateBitmapFromFile(srcPath, &src) != Ok || !src) {
+    void *srcPixels = NULL;
+    GpBitmap *src = Magify_Image_LoadBitmap(srcPath, &srcPixels);
+    if (!src) {
         swprintf(ctx->statusText, 128, L"Failed to open image");
         return FALSE;
     }
@@ -571,7 +759,7 @@ BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, Ma
 
     if (bestSize == 0 || !bestBuf) {
         if (curBmp != src) GdipDisposeImage(curBmp);
-        GdipDisposeImage(src);
+        Magify_Image_FreeBitmap(src, srcPixels);
         if (bestBuf) free(bestBuf);
         swprintf(ctx->statusText, 128, L"Could not compress under target");
         return FALSE;
@@ -598,7 +786,7 @@ BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, Ma
     free(bestBuf);
 
     if (curBmp != src) GdipDisposeImage(curBmp);
-    GdipDisposeImage(src);
+    Magify_Image_FreeBitmap(src, srcPixels);
     return TRUE;
 }
 
@@ -624,8 +812,9 @@ static DWORD WINAPI CompressWorker(void *arg) {
     swprintf(p->ctx->statusText, 128, L"Compressing (%d%%)...", p->intParam);
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GpBitmap *bmp = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &bmp) != Ok || !bmp) {
+    void *srcPixels = NULL;
+    GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!bmp) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -657,7 +846,7 @@ static DWORD WINAPI CompressWorker(void *arg) {
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     }
 
-    GdipDisposeImage(bmp);
+    Magify_Image_FreeBitmap(bmp, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
@@ -685,8 +874,9 @@ static DWORD WINAPI CropWorker(void *arg) {
     swprintf(p->ctx->statusText, 128, L"Cropping image (%dx%d)...", p->cropW, p->cropH);
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-    GpBitmap *src = NULL;
-    if (GdipCreateBitmapFromFile(p->srcPath, &src) != Ok || !src) {
+    void *srcPixels = NULL;
+    GpBitmap *src = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
+    if (!src) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to load image");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -699,7 +889,7 @@ static DWORD WINAPI CropWorker(void *arg) {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Failed to crop region");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
-        GdipDisposeImage(src);
+        Magify_Image_FreeBitmap(src, srcPixels);
         free(p);
         return 0;
     }
@@ -727,7 +917,7 @@ static DWORD WINAPI CropWorker(void *arg) {
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
     GdipDisposeImage(cropped);
-    GdipDisposeImage(src);
+    Magify_Image_FreeBitmap(src, srcPixels);
     p->ctx->progressPercent = 100;
     p->ctx->jobProgress = 100;
     free(p);
@@ -809,8 +999,9 @@ static DWORD WINAPI ImagesToPDFWorker(void *arg) {
         swprintf(p->ctx->statusText, 128, L"Processing image %d of %d...", i + 1, p->count);
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-        GpBitmap *bmp = NULL;
-        if (GdipCreateBitmapFromFile(p->files[i], &bmp) != Ok || !bmp) continue;
+        void *imgPixels = NULL;
+        GpBitmap *bmp = Magify_Image_LoadBitmap(p->files[i], &imgPixels);
+        if (!bmp) continue;
 
         UINT imgW = 0, imgH = 0;
         GdipGetImageWidth(bmp, &imgW);
@@ -885,7 +1076,7 @@ static DWORD WINAPI ImagesToPDFWorker(void *arg) {
 
         GlobalUnlock(hg);
         strm->lpVtbl->Release(strm);
-        GdipDisposeImage(bmp);
+        Magify_Image_FreeBitmap(bmp, imgPixels);
     }
 
     // XREF Table
@@ -936,8 +1127,9 @@ BOOL Magify_GeneratePreview(const WCHAR *srcPath, int targetW, int targetH,
                             uint32_t *outPixels, int *actualW, int *actualH) {
     Magify_Image_Init();
 
-    GpBitmap *src = NULL;
-    if (GdipCreateBitmapFromFile(srcPath, &src) != Ok || !src) return FALSE;
+    void *srcPixels = NULL;
+    GpBitmap *src = Magify_Image_LoadBitmap(srcPath, &srcPixels);
+    if (!src) return FALSE;
 
     UINT origW = 0, origH = 0;
     GdipGetImageWidth(src, &origW);
@@ -963,6 +1155,6 @@ BOOL Magify_GeneratePreview(const WCHAR *srcPath, int targetW, int targetH,
 
     GdipDeleteGraphics(g);
     GdipDisposeImage(scaled);
-    GdipDisposeImage(src);
+    Magify_Image_FreeBitmap(src, srcPixels);
     return TRUE;
 }

@@ -42,7 +42,10 @@ MagifyFileClass Magify_DetectFileClass(const WCHAR *filePath) {
         _wcsicmp(ext, L".ico") == 0 ||
         _wcsicmp(ext, L".gif") == 0 ||
         _wcsicmp(ext, L".tif") == 0 ||
-        _wcsicmp(ext, L".tiff") == 0) {
+        _wcsicmp(ext, L".tiff") == 0 ||
+        _wcsicmp(ext, L".heic") == 0 ||
+        _wcsicmp(ext, L".heif") == 0 ||
+        _wcsicmp(ext, L".avif") == 0) {
         return FILE_CLASS_IMAGE;
     }
 
@@ -74,6 +77,13 @@ MagifyFileClass Magify_DetectFileClass(const WCHAR *filePath) {
             if (bytesRead >= 12 &&
                 buf[0] == 'R' && buf[1] == 'I' && buf[2] == 'F' && buf[3] == 'F' &&
                 buf[8] == 'W' && buf[9] == 'E' && buf[10] == 'B' && buf[11] == 'P') {
+                return FILE_CLASS_IMAGE;
+            }
+            if (bytesRead >= 12 &&
+                buf[4] == 'f' && buf[5] == 't' && buf[6] == 'y' && buf[7] == 'p' &&
+                ((buf[8] == 'h' && buf[9] == 'e' && buf[10] == 'i') ||
+                 (buf[8] == 'm' && buf[9] == 'i' && buf[10] == 'f') ||
+                 (buf[8] == 'm' && buf[9] == 's' && buf[10] == 'f'))) {
                 return FILE_CLASS_IMAGE;
             }
         } else {

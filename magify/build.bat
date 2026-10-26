@@ -23,7 +23,7 @@ if %ERRORLEVEL% EQU 0 (
         src\main.c src\ipc.c src\registry.c src\com_extension.c src\ui_overlay.c ^
         src\ops_common.c src\ops_image.c src\ops_pdf.c ^
         build\magify.res ^
-        -lgdi32 -luser32 -lshell32 -lole32 -luuid -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus ^
+        -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus ^
         -o build\magify.exe
 
     if !ERRORLEVEL! NEQ 0 (
@@ -64,7 +64,7 @@ cl.exe /nologo /O2 /W4 /WX /std:c11 /utf-8 ^
     src\ops_common.c src\ops_image.c src\ops_pdf.c ^
     build\magify.res ^
     /link /SUBSYSTEM:WINDOWS /OUT:build\magify.exe ^
-    user32.lib gdi32.lib shell32.lib ole32.lib uuid.lib shlwapi.lib dwmapi.lib comctl32.lib comdlg32.lib advapi32.lib gdiplus.lib
+    user32.lib gdi32.lib shell32.lib ole32.lib uuid.lib windowscodecs.lib shlwapi.lib dwmapi.lib comctl32.lib comdlg32.lib advapi32.lib gdiplus.lib
 
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] Linking failed.

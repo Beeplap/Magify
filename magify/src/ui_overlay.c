@@ -35,6 +35,61 @@ static const int TEXT_SCRATCH_H = 80;
 static float g_sliceHover[8] = {0};
 static float g_hubHover = 0.0f;
 
+BOOL Magify_IsSystemLightTheme(void) {
+    HKEY hKey;
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    LONG res = RegOpenKeyExW(
+        HKEY_CURRENT_USER,
+        L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+        0, KEY_READ, &hKey);
+    if (res == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (LPBYTE)&value, &size) == ERROR_SUCCESS) {
+            RegCloseKey(hKey);
+            return (value != 0);
+        }
+        RegCloseKey(hKey);
+    }
+    return FALSE; // Default to dark mode
+}
+
+MagifyThemePalette Magify_GetActiveTheme(void) {
+    MagifyThemePalette p;
+    memset(&p, 0, sizeof(p));
+    p.isLightMode = Magify_IsSystemLightTheme();
+
+    if (p.isLightMode) {
+        // Light Mode: Background #F8FAFC (Alpha 92%), Text #0F172A, Border/Glow #6D28D9 -> #0891B2, Slices #E2E8F0
+        p.hubBgR = 248; p.hubBgG = 250; p.hubBgB = 252; p.hubBgA = 240;
+        p.hubBdrR = 109; p.hubBdrG = 40; p.hubBdrB = 217; // Deep Violet #6D28D9
+        p.sliceNormR = 226; p.sliceNormG = 232; p.sliceNormB = 240; p.sliceNormA = 235; // Slate #E2E8F0
+        p.sliceHovR1 = 109; p.sliceHovG1 = 40; p.sliceHovB1 = 217;
+        p.sliceHovR2 = 8; p.sliceHovG2 = 145; p.sliceHovB2 = 178; // Cyan #0891B2
+        p.glowR = 8; p.glowG = 145; p.glowB = 178;
+        p.trackR = 203; p.trackG = 213; p.trackB = 225; p.trackA = 140; // Slate 300
+        p.textPrimary = RGB(15, 23, 42); // Slate 900
+        p.textSecondary = RGB(71, 85, 105); // Slate 600
+        p.textAccent = RGB(8, 145, 178); // Cyan 600
+        p.cardBg = RGB(248, 250, 252);
+        p.cardBorder = RGB(109, 40, 217);
+    } else {
+        // Dark Mode: Background #12131A (Alpha 88%), Text #F8FAFC, Border/Glow #7C3AED -> #22D3EE, Slices #1E2230
+        p.hubBgR = 18; p.hubBgG = 19; p.hubBgB = 26; p.hubBgA = 235;
+        p.hubBdrR = 124; p.hubBdrG = 58; p.hubBdrB = 237; // Electric Violet #7C3AED
+        p.sliceNormR = 30; p.sliceNormG = 34; p.sliceNormB = 48; p.sliceNormA = 228; // #1E2230
+        p.sliceHovR1 = 124; p.sliceHovG1 = 58; p.sliceHovB1 = 237;
+        p.sliceHovR2 = 6; p.sliceHovG2 = 182; p.sliceHovB2 = 212; // Cyan #06B6D4
+        p.glowR = 34; p.glowG = 211; p.glowB = 238; // Cyber Cyan #22D3EE
+        p.trackR = 30; p.trackG = 41; p.trackB = 59; p.trackA = 90; // Slate 800
+        p.textPrimary = RGB(248, 250, 252);
+        p.textSecondary = RGB(148, 163, 184);
+        p.textAccent = RGB(34, 211, 238);
+        p.cardBg = RGB(18, 19, 26);
+        p.cardBorder = RGB(124, 58, 237);
+    }
+    return p;
+}
+
 // Forward declarations
 static void ResizeOverlayWindow(MagifyContext *ctx, int newW, int newH);
 static void InitRenameHUD(MagifyContext *ctx);
@@ -336,15 +391,17 @@ static void RenderRenameHUD(MagifyContext *ctx) {
     int px = (int)(cx - (float)pillW * 0.5f);
     int py = (int)(cy - (float)pillH * 0.5f);
 
-    // Dark-glass container pill
+    const MagifyThemePalette *th = &ctx->themePalette;
+
+    // Container pill
     DrawRoundedBoxARGB(px, py, pillW, pillH, 18.0f,
-                       18, 19, 26, 242,   // Obsidian Glass #12131A
-                       124, 58, 237, 220, // Electric Violet #7C3AED
+                       th->hubBgR, th->hubBgG, th->hubBgB, th->hubBgA,
+                       th->hubBdrR, th->hubBdrG, th->hubBdrB, 220,
                        1.5f);
 
     // Header label & hints
-    DrawCrispTextARGB(L"RENAME FILE", px + 22, py + 16, RGB(34, 211, 238), 11, FW_BOLD, 1.0f, TRUE);
-    DrawCrispTextARGB(L"Enter to apply • Esc to cancel", px + pillW - 170, py + 16, RGB(148, 163, 184), 9, FW_NORMAL, 1.0f, TRUE);
+    DrawCrispTextARGB(L"RENAME FILE", px + 22, py + 16, th->textAccent, 11, FW_BOLD, 1.0f, TRUE);
+    DrawCrispTextARGB(L"Enter to apply • Esc to cancel", px + pillW - 170, py + 16, th->textSecondary, 9, FW_NORMAL, 1.0f, TRUE);
 
     // Inner text input box
     int bx = px + 18;
@@ -352,10 +409,17 @@ static void RenderRenameHUD(MagifyContext *ctx) {
     int bw = pillW - 36;
     int bh = 38;
 
-    DrawRoundedBoxARGB(bx, by, bw, bh, 8.0f,
-                       28, 32, 46, 255,   // Dark input surface #1C202E
-                       51, 65, 85, 200,   // Slate border
-                       1.0f);
+    if (th->isLightMode) {
+        DrawRoundedBoxARGB(bx, by, bw, bh, 8.0f,
+                           241, 245, 249, 255,   // Light input #F1F5F9
+                           203, 213, 225, 200,   // Slate 300
+                           1.0f);
+    } else {
+        DrawRoundedBoxARGB(bx, by, bw, bh, 8.0f,
+                           28, 32, 46, 255,   // Dark input surface #1C202E
+                           51, 65, 85, 200,   // Slate border
+                           1.0f);
+    }
 
     // Text & caret rendering
     int textStartX = bx + 12;
@@ -370,17 +434,20 @@ static void RenderRenameHUD(MagifyContext *ctx) {
                            124, 58, 237, 180, 124, 58, 237, 255, 1.0f);
     }
 
-    COLORREF txtCol = hasSel ? RGB(255, 255, 255) : RGB(248, 250, 252);
+    COLORREF txtCol = hasSel ? (th->isLightMode ? RGB(0, 0, 0) : RGB(255, 255, 255)) : th->textPrimary;
     DrawCrispTextARGB(ctx->renameBuf, textStartX, textY, txtCol, 12, FW_SEMIBOLD, 1.0f, TRUE);
 
     // Caret cursor
     if (ctx->renameCaretVisible && !hasSel) {
         int caretX = textStartX + ctx->renameCursor * 8;
         if (caretX > bx + bw - 70) caretX = bx + bw - 70;
+        uint8_t carR = GetRValue(th->textAccent);
+        uint8_t carG = GetGValue(th->textAccent);
+        uint8_t carB = GetBValue(th->textAccent);
         for (int y = by + 9; y <= by + 28; y++) {
             if (y >= 0 && y < g_surfHeight && caretX >= 0 && caretX < g_surfWidth) {
-                g_pixels[y * g_surfWidth + caretX] = PremultiplyARGB(255, 34, 211, 238);
-                g_pixels[y * g_surfWidth + caretX + 1] = PremultiplyARGB(255, 34, 211, 238);
+                g_pixels[y * g_surfWidth + caretX] = PremultiplyARGB(255, carR, carG, carB);
+                g_pixels[y * g_surfWidth + caretX + 1] = PremultiplyARGB(255, carR, carG, carB);
             }
         }
     }
@@ -390,11 +457,19 @@ static void RenderRenameHUD(MagifyContext *ctx) {
     int badgeH = 26;
     int badgeX = bx + bw - badgeW - 6;
     int badgeY = by + 6;
-    DrawRoundedBoxARGB(badgeX, badgeY, badgeW, badgeH, 6.0f,
-                       22, 78, 99, 230,   // #164E63
-                       6, 182, 212, 200,  // #06B6D4
-                       1.0f);
-    DrawCrispTextARGB(ctx->renameExt, badgeX + (badgeW / 2), badgeY + 13, RGB(34, 211, 238), 10, FW_BOLD, 1.0f, FALSE);
+    if (th->isLightMode) {
+        DrawRoundedBoxARGB(badgeX, badgeY, badgeW, badgeH, 6.0f,
+                           224, 242, 254, 230,   // Light Cyan #E0F2FE
+                           8, 145, 178, 200,     // #0891B2
+                           1.0f);
+        DrawCrispTextARGB(ctx->renameExt, badgeX + (badgeW / 2), badgeY + 13, RGB(8, 145, 178), 10, FW_BOLD, 1.0f, FALSE);
+    } else {
+        DrawRoundedBoxARGB(badgeX, badgeY, badgeW, badgeH, 6.0f,
+                           22, 78, 99, 230,   // #164E63
+                           6, 182, 212, 200,  // #06B6D4
+                           1.0f);
+        DrawCrispTextARGB(ctx->renameExt, badgeX + (badgeW / 2), badgeY + 13, RGB(34, 211, 238), 10, FW_BOLD, 1.0f, FALSE);
+    }
 
     // Apply button
     int btnW = 100, btnH = 28;
@@ -409,11 +484,17 @@ static void RenderRenameHUD(MagifyContext *ctx) {
     // Cancel button
     int cBtnW = 75;
     int cBtnX = btnX - cBtnW - 10;
-    DrawRoundedBoxARGB(cBtnX, btnY, cBtnW, btnH, 8.0f,
-                       30, 41, 59, 200,   // Slate #1E293B
-                       71, 85, 105, 180,
-                       1.0f);
-    DrawCrispTextARGB(L"Cancel", cBtnX + (cBtnW / 2), btnY + 14, RGB(148, 163, 184), 10, FW_SEMIBOLD, 1.0f, FALSE);
+    if (th->isLightMode) {
+        DrawRoundedBoxARGB(cBtnX, btnY, cBtnW, btnH, 8.0f,
+                           226, 232, 240, 200, 203, 213, 225, 180, 1.0f);
+        DrawCrispTextARGB(L"Cancel", cBtnX + (cBtnW / 2), btnY + 14, th->textSecondary, 10, FW_SEMIBOLD, 1.0f, FALSE);
+    } else {
+        DrawRoundedBoxARGB(cBtnX, btnY, cBtnW, btnH, 8.0f,
+                           30, 41, 59, 200,   // Slate #1E293B
+                           71, 85, 105, 180,
+                           1.0f);
+        DrawCrispTextARGB(L"Cancel", cBtnX + (cBtnW / 2), btnY + 14, RGB(148, 163, 184), 10, FW_SEMIBOLD, 1.0f, FALSE);
+    }
 }
 
 // -------------------------------------------------------------
@@ -446,20 +527,22 @@ static void InitCropHUD(MagifyContext *ctx) {
 }
 
 static void RenderCropHUD(MagifyContext *ctx) {
-    // 1. Dark-glass container frame
+    const MagifyThemePalette *th = &ctx->themePalette;
+
+    // 1. Container frame
     DrawRoundedBoxARGB(10, 10, g_surfWidth - 20, g_surfHeight - 20, 18.0f,
-                       18, 19, 26, 245,   // #12131A
-                       124, 58, 237, 200, // Violet border
+                       th->hubBgR, th->hubBgG, th->hubBgB, th->hubBgA,
+                       th->hubBdrR, th->hubBdrG, th->hubBdrB, 200,
                        1.5f);
 
     // 2. Header
-    DrawCrispTextARGB(L"INTERACTIVE CROP & ASPECT RATIO", g_surfWidth / 2, 28, RGB(34, 211, 238), 12, FW_BOLD, 1.0f, FALSE);
+    DrawCrispTextARGB(L"INTERACTIVE CROP & ASPECT RATIO", g_surfWidth / 2, 28, th->textAccent, 12, FW_BOLD, 1.0f, FALSE);
 
     int curCropPxW = (int)(ctx->cropNormW * (float)ctx->cropOrigW);
     int curCropPxH = (int)(ctx->cropNormH * (float)ctx->cropOrigH);
     WCHAR dimStr[64];
     swprintf(dimStr, 64, L"Orig: %dx%d px  ->  Crop: %dx%d px", ctx->cropOrigW, ctx->cropOrigH, curCropPxW, curCropPxH);
-    DrawCrispTextARGB(dimStr, g_surfWidth / 2, 46, RGB(248, 250, 252), 10, FW_NORMAL, 1.0f, FALSE);
+    DrawCrispTextARGB(dimStr, g_surfWidth / 2, 46, th->textPrimary, 10, FW_NORMAL, 1.0f, FALSE);
 
     // 3. Central Viewport & Preview Image
     int vpX = (g_surfWidth - ctx->cropPreviewW) / 2;
@@ -648,6 +731,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
     }
 
     float sliceSpan = 360.0f / (float)sliceCount;
+    const MagifyThemePalette *th = &ctx->themePalette;
 
     for (int i = 0; i < sliceCount; i++) {
         float target = (ctx->hoveredSlice == i) ? 1.0f : 0.0f;
@@ -696,44 +780,50 @@ static void RenderRadialMenu(MagifyContext *ctx) {
                             g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 16, 185, 129);
                             continue;
                         } else if (relAngle <= maxAngle) {
-                            // Rotating gradient sweep: Electric Violet (#7C3AED) -> Cyber Cyan (#22D3EE)
+                            // Rotating gradient sweep: Violet -> Cyan (theme based)
                             float tGrad = relAngle / 360.0f;
-                            uint8_t r = (uint8_t)(124.0f + (34.0f - 124.0f) * tGrad);
-                            uint8_t g = (uint8_t)(58.0f + (211.0f - 58.0f) * tGrad);
-                            uint8_t b = (uint8_t)(237.0f + (238.0f - 237.0f) * tGrad);
+                            uint8_t r = (uint8_t)((float)th->sliceHovR1 + ((float)th->sliceHovR2 - (float)th->sliceHovR1) * tGrad);
+                            uint8_t g = (uint8_t)((float)th->sliceHovG1 + ((float)th->sliceHovG2 - (float)th->sliceHovG1) * tGrad);
+                            uint8_t b = (uint8_t)((float)th->sliceHovB1 + ((float)th->sliceHovB2 - (float)th->sliceHovB1) * tGrad);
                             uint8_t a = (uint8_t)(255.0f * covRing * globalAlpha);
                             g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, r, g, b);
                             continue;
                         } else {
                             // Track background
-                            uint8_t a = (uint8_t)(90.0f * covRing * globalAlpha);
-                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 30, 41, 59);
+                            uint8_t a = (uint8_t)((float)th->trackA * covRing * globalAlpha);
+                            g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, th->trackR, th->trackG, th->trackB);
                             continue;
                         }
                     }
 
                     // Interior background
-                    uint8_t a = (uint8_t)(245.0f * cov * globalAlpha);
-                    g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, 18, 19, 26);
+                    uint8_t a = (uint8_t)((float)th->hubBgA * cov * globalAlpha);
+                    g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, th->hubBgR, th->hubBgG, th->hubBgB);
                     continue;
                 }
 
                 // Normal Hub
-                uint8_t r = 18, g = 19, b = 26;
-                uint8_t a = (uint8_t)(235.0f * cov * globalAlpha);
+                uint8_t r = th->hubBgR, g = th->hubBgG, b = th->hubBgB;
+                uint8_t a = (uint8_t)((float)th->hubBgA * cov * globalAlpha);
 
                 if (g_hubHover > 0.01f) {
-                    r = (uint8_t)(r + (34 - r) * g_hubHover);
-                    g = (uint8_t)(g + (45 - g) * g_hubHover);
-                    b = (uint8_t)(b + (70 - b) * g_hubHover);
+                    if (th->isLightMode) {
+                        r = (uint8_t)(r - (r - 220) * g_hubHover);
+                        g = (uint8_t)(g - (g - 225) * g_hubHover);
+                        b = (uint8_t)(b - (b - 235) * g_hubHover);
+                    } else {
+                        r = (uint8_t)(r + (34 - r) * g_hubHover);
+                        g = (uint8_t)(g + (45 - g) * g_hubHover);
+                        b = (uint8_t)(b + (70 - b) * g_hubHover);
+                    }
                 }
 
                 float borderDist = fabsf(dist - hubRadius);
                 if (borderDist < 2.5f) {
                     float bFactor = (1.0f - (borderDist / 2.5f)) * globalAlpha;
-                    uint8_t br = (uint8_t)((124.0f + 50.0f * g_hubHover) * bFactor);
-                    uint8_t bg = (uint8_t)((58.0f + 150.0f * g_hubHover) * bFactor);
-                    uint8_t bb = (uint8_t)(237.0f * bFactor);
+                    uint8_t br = (uint8_t)((float)th->hubBdrR * bFactor);
+                    uint8_t bg = (uint8_t)((float)th->hubBdrG * bFactor);
+                    uint8_t bb = (uint8_t)((float)th->hubBdrB * bFactor);
                     g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, br, bg, bb);
                     continue;
                 }
@@ -773,12 +863,12 @@ static void RenderRadialMenu(MagifyContext *ctx) {
                 float radFactor = (dist - innerRadius) / (outerR - innerRadius);
                 radFactor = ClampFloat(radFactor, 0.0f, 1.0f);
 
-                uint8_t normR = 24, normG = 27, normB = 38;
-                uint8_t normA = (uint8_t)(228.0f * cov * globalAlpha * slicesAlpha);
+                uint8_t normR = th->sliceNormR, normG = th->sliceNormG, normB = th->sliceNormB;
+                uint8_t normA = (uint8_t)((float)th->sliceNormA * cov * globalAlpha * slicesAlpha);
 
-                uint8_t hovR = (uint8_t)(124.0f + (6.0f - 124.0f) * radFactor);
-                uint8_t hovG = (uint8_t)(58.0f + (182.0f - 58.0f) * radFactor);
-                uint8_t hovB = (uint8_t)(237.0f + (212.0f - 237.0f) * radFactor);
+                uint8_t hovR = (uint8_t)((float)th->sliceHovR1 + ((float)th->sliceHovR2 - (float)th->sliceHovR1) * radFactor);
+                uint8_t hovG = (uint8_t)((float)th->sliceHovG1 + ((float)th->sliceHovG2 - (float)th->sliceHovG1) * radFactor);
+                uint8_t hovB = (uint8_t)((float)th->sliceHovB1 + ((float)th->sliceHovB2 - (float)th->sliceHovB1) * radFactor);
                 uint8_t hovA = (uint8_t)(245.0f * cov * globalAlpha * slicesAlpha);
 
                 uint8_t r = (uint8_t)(normR + ((float)hovR - normR) * hAmount);
@@ -788,9 +878,9 @@ static void RenderRadialMenu(MagifyContext *ctx) {
 
                 if (hAmount > 0.1f && dOuter < 3.0f && dOuter >= -0.5f) {
                     float edgeGlow = (1.0f - (dOuter / 3.0f)) * hAmount * globalAlpha * slicesAlpha;
-                    r = (uint8_t)(r + (34 - r) * edgeGlow);
-                    g = (uint8_t)(g + (211 - g) * edgeGlow);
-                    b = (uint8_t)(b + (238 - b) * edgeGlow);
+                    r = (uint8_t)(r + ((float)th->glowR - r) * edgeGlow);
+                    g = (uint8_t)(g + ((float)th->glowG - g) * edgeGlow);
+                    b = (uint8_t)(b + ((float)th->glowB - b) * edgeGlow);
                 }
 
                 g_pixels[y * g_surfWidth + x] = PremultiplyARGB(a, r, g, b);
@@ -809,13 +899,13 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         } else {
             WCHAR progStr[32];
             swprintf(progStr, 32, L"%d%%", (int)ctx->progressPercent);
-            DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, RGB(255, 255, 255), 20, FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, th->textPrimary, 20, FW_BOLD, globalAlpha, FALSE);
             const WCHAR *statusMsg = (ctx->progressStatusText[0] != L'\0') ? ctx->progressStatusText : ctx->statusText;
-            DrawCrispTextARGB(statusMsg, (int)cx, (int)cy + 14, RGB(34, 211, 238), 9, FW_NORMAL, globalAlpha, FALSE);
+            DrawCrispTextARGB(statusMsg, (int)cx, (int)cy + 14, th->textAccent, 9, FW_NORMAL, globalAlpha, FALSE);
         }
     } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
-        DrawCrispTextARGB(L"← BACK", (int)cx, (int)cy - 6, RGB(34, 211, 238), 14, FW_BOLD, globalAlpha, FALSE);
-        DrawCrispTextARGB(L"Click to return", (int)cx, (int)cy + 12, RGB(148, 163, 184), 9, FW_NORMAL, globalAlpha, FALSE);
+        DrawCrispTextARGB(L"← BACK", (int)cx, (int)cy - 6, th->textAccent, 14, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(L"Click to return", (int)cx, (int)cy + 12, th->textSecondary, 9, FW_NORMAL, globalAlpha, FALSE);
     } else {
         WCHAR badge[32] = {0};
         if (ctx->fileCount > 1) {
@@ -827,7 +917,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         } else {
             wcscpy(badge, L"FILE");
         }
-        DrawCrispTextARGB(badge, (int)cx, (int)cy - 16, RGB(34, 211, 238), 12, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(badge, (int)cx, (int)cy - 16, th->textAccent, 12, FW_BOLD, globalAlpha, FALSE);
 
         WCHAR nameDisplay[32] = {0};
         if (ctx->fileCount == 1 && ctx->files[0][0] != L'\0') {
@@ -838,11 +928,11 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         } else {
             wcscpy(nameDisplay, L"Magify");
         }
-        DrawCrispTextARGB(nameDisplay, (int)cx, (int)cy, RGB(248, 250, 252), 11, FW_SEMIBOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(nameDisplay, (int)cx, (int)cy, th->textPrimary, 11, FW_SEMIBOLD, globalAlpha, FALSE);
 
         WCHAR sizeStr[32] = {0};
         Magify_FormatFileSize(ctx->totalSizeBytes, sizeStr, 32);
-        DrawCrispTextARGB(sizeStr, (int)cx, (int)cy + 15, RGB(148, 163, 184), 10, FW_NORMAL, globalAlpha, FALSE);
+        DrawCrispTextARGB(sizeStr, (int)cx, (int)cy + 15, th->textSecondary, 10, FW_NORMAL, globalAlpha, FALSE);
     }
 
     // Slice Labels
@@ -868,8 +958,8 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         int lx = (int)(cx + cosf(rad) * curLabelR);
         int ly = (int)(cy + sinf(rad) * curLabelR);
 
-        COLORREF titleColor = (hAmount > 0.5f) ? RGB(255, 255, 255) : RGB(248, 250, 252);
-        COLORREF subColor = (hAmount > 0.5f) ? RGB(220, 245, 255) : RGB(148, 163, 184);
+        COLORREF titleColor = (hAmount > 0.5f) ? (th->isLightMode ? RGB(109, 40, 217) : RGB(255, 255, 255)) : th->textPrimary;
+        COLORREF subColor = (hAmount > 0.5f) ? (th->isLightMode ? RGB(8, 145, 178) : RGB(220, 245, 255)) : th->textSecondary;
 
         int titleFont = (sliceCount <= 4) ? 12 : 11;
         int subFont = (sliceCount <= 4) ? 9 : 8;
@@ -1212,16 +1302,17 @@ static void RenderPdfOrganizerHUD(MagifyContext *ctx) {
     MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
     if (!org) return;
 
+    const MagifyThemePalette *th = &ctx->themePalette;
     float s = (float)g_surfWidth / 760.0f;
 
-    // Background: Obsidian Glass
+    // Background
     DrawRoundedBoxARGB(0, 0, g_surfWidth, g_surfHeight, 16.0f * s,
-                       18, 19, 26, 242,
-                       51, 65, 85, 255, 1.2f * s);
+                       th->hubBgR, th->hubBgG, th->hubBgB, th->hubBgA,
+                       th->hubBdrR, th->hubBdrG, th->hubBdrB, 255, 1.2f * s);
 
     // Top Header Bar
     const WCHAR *fileName = PathFindFileNameW(ctx->files[0]);
-    DrawCrispTextARGB(fileName, (int)(26 * s), (int)(28 * s), RGB(248, 250, 252), (int)(13 * s), FW_BOLD, 1.0f, TRUE);
+    DrawCrispTextARGB(fileName, (int)(26 * s), (int)(28 * s), th->textPrimary, (int)(13 * s), FW_BOLD, 1.0f, TRUE);
 
     int activePages = 0;
     for (int p = 0; p < org->totalPages; p++) {
@@ -2109,6 +2200,7 @@ HWND Magify_CreateOverlayWindow(HINSTANCE hInst, int width, int height, POINT cu
 void Magify_ShowOverlay(MagifyContext *ctx) {
     g_overlayCtx = ctx;
 
+    ctx->themePalette = Magify_GetActiveTheme();
     Magify_Image_Init();
 
     HDC hdcScreen = GetDC(NULL);
