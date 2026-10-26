@@ -1,0 +1,31 @@
+CC = cl.exe
+RC = rc.exe
+
+CFLAGS = /nologo /O2 /W4 /WX /std:c11 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /Iinclude
+LDFLAGS = /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib shlwapi.lib dwmapi.lib comctl32.lib advapi32.lib gdiplus.lib
+
+OBJS = build\main.obj build\ipc.obj build\registry.obj build\ui_overlay.obj \
+       build\ops_common.obj build\ops_image.obj build\ops_pdf.obj
+
+RES = build\magify.res
+TARGET = build\magify.exe
+
+all: $(TARGET)
+
+$(TARGET): $(OBJS) $(RES)
+	$(CC) $(OBJS) $(RES) /Fe$@ $(LDFLAGS)
+
+{src}.c{build}.obj:
+	$(CC) $(CFLAGS) /c $< /Fo$@
+
+$(RES): assets\magify.rc assets\magify.manifest assets\magify.ico
+	$(RC) /nologo /fo $(RES) assets\magify.rc
+
+clean:
+	-del /q /f $(OBJS) $(RES) $(TARGET) 2>nul
+
+install: $(TARGET)
+	$(TARGET) --install
+
+uninstall: $(TARGET)
+	$(TARGET) --uninstall
