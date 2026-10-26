@@ -1,0 +1,40 @@
+# Build output directories
+bin/
+build/
+magify/build/
+
+# Object and library files
+*.o
+*.obj
+*.res
+*.lib
+*.a
+*.dll
+*.so
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# Debug symbols and IDE files
+*.pdb
+*.ilk
+*.idb
+.vs/
+.vscode/
+*.suo
+*.user
+
+# Test outputs
+magify/test_assets/test_archive.zip
+magify/test_assets/test_pattern_converted*
+magify/test_assets/images_merged.pdf
+magify/test_assets/temp_*
+magify/test_assets/renamed_*
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
