@@ -31,6 +31,9 @@ magify/build/
 magify/test_assets/test_archive.zip
 magify/test_assets/test_pattern_converted*
 magify/test_assets/images_merged.pdf
+magify/test_assets/sample_multi*
+magify/test_assets/sample_split*
+magify/test_assets/merged_docs*
 magify/test_assets/temp_*
 magify/test_assets/renamed_*
 

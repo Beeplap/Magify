@@ -92,6 +92,9 @@ typedef struct {
     int             cropPreviewW;
     int             cropPreviewH;
 
+    // PDF Organizer HUD state
+    void           *pdfOrganizer;       // MagifyPdfOrganizerState*
+
     // Overlay surface geometry
     int             overlayWidth;
     int             overlayHeight;

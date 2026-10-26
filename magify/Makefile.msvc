@@ -1,8 +1,8 @@
 CC = cl.exe
 RC = rc.exe
 
-CFLAGS = /nologo /O2 /W4 /WX /std:c11 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /Iinclude
-LDFLAGS = /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib shlwapi.lib dwmapi.lib comctl32.lib advapi32.lib gdiplus.lib
+CFLAGS = /nologo /O2 /W4 /WX /std:c11 /utf-8 /DUNICODE /D_UNICODE /D_CRT_SECURE_NO_WARNINGS /Iinclude /Ithird_party
+LDFLAGS = /link /SUBSYSTEM:WINDOWS user32.lib gdi32.lib shell32.lib ole32.lib shlwapi.lib dwmapi.lib comctl32.lib comdlg32.lib advapi32.lib gdiplus.lib
 
 OBJS = build\main.obj build\ipc.obj build\registry.obj build\ui_overlay.obj \
        build\ops_common.obj build\ops_image.obj build\ops_pdf.obj

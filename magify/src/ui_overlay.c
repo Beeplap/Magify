@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <shlwapi.h>
+#include <commdlg.h>
 
 #define MAGIFY_PI 3.14159265358979323846f
 #define TIMER_ANIM_ID 1
@@ -38,6 +39,13 @@ static float g_hubHover = 0.0f;
 static void ResizeOverlayWindow(MagifyContext *ctx, int newW, int newH);
 static void InitRenameHUD(MagifyContext *ctx);
 static void InitCropHUD(MagifyContext *ctx);
+static void InitPdfOrganizerHUD(MagifyContext *ctx);
+static void RenderPdfOrganizerHUD(MagifyContext *ctx);
+static void HandlePdfOrganizerMouseMove(MagifyContext *ctx, int mx, int my);
+static void HandlePdfOrganizerMouseDown(MagifyContext *ctx, int mx, int my);
+static void HandlePdfOrganizerMouseUp(MagifyContext *ctx);
+static void HandlePdfOrganizerMouseWheel(MagifyContext *ctx, int delta);
+static void HandlePdfOrganizerKeyDown(MagifyContext *ctx, WPARAM wParam);
 
 int Magify_HitTestRadial(float mouseX, float mouseY, float centerX, float centerY,
                          float innerR, float outerR, int sliceCount, float rotationOffsetDeg) {
@@ -228,17 +236,17 @@ static void DrawRoundedBoxARGB(int x, int y, int w, int h, float radius,
 static int GetSubmenuSliceCount(MagifyContext *ctx) {
     if (ctx->activeSubmenu == SUBMENU_CONVERT) {
         if (ctx->primaryClass == FILE_CLASS_IMAGE) return 5; // PNG, JPG, BMP, ICO, PDF
-        if (ctx->primaryClass == FILE_CLASS_PDF)   return 3;
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 4; // JPG, PNG, Text, Back
         return 2;
     }
     if (ctx->activeSubmenu == SUBMENU_EDIT) {
         if (ctx->primaryClass == FILE_CLASS_IMAGE) return 5; // Rotate CW, CCW, Flip H, Resize, Crop
-        if (ctx->primaryClass == FILE_CLASS_PDF)   return 4;
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 5; // Page Organizer, Rotate CW, Rotate CCW, Split, Merge
         return 2;
     }
     if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
         if (ctx->primaryClass == FILE_CLASS_IMAGE) return 4; // Lossless, 80%, 60%, <200KB
-        if (ctx->primaryClass == FILE_CLASS_PDF)   return 3;
+        if (ctx->primaryClass == FILE_CLASS_PDF)   return 4; // Light 300, Balanced 150, Extreme 96, Back
         return 1;
     }
     return 4;
@@ -261,6 +269,7 @@ static void GetSubmenuSlices(MagifyContext *ctx, SliceDesc *descs, int maxCount)
             wcscpy(descs[0].title, L"JPG Pages"); wcscpy(descs[0].subtitle, L"Export");
             wcscpy(descs[1].title, L"PNG Pages"); wcscpy(descs[1].subtitle, L"300 DPI");
             wcscpy(descs[2].title, L"Extract");   wcscpy(descs[2].subtitle, L"Plain Text");
+            wcscpy(descs[3].title, L"Back");      wcscpy(descs[3].subtitle, L"Return");
         } else {
             wcscpy(descs[0].title, L"ZIP");    wcscpy(descs[0].subtitle, L"Archive");
             wcscpy(descs[1].title, L"Cancel"); wcscpy(descs[1].subtitle, L"Return");
@@ -273,10 +282,11 @@ static void GetSubmenuSlices(MagifyContext *ctx, SliceDesc *descs, int maxCount)
             wcscpy(descs[3].title, L"Resize");      wcscpy(descs[3].subtitle, L"50% / 1080p");
             wcscpy(descs[4].title, L"Crop");        wcscpy(descs[4].subtitle, L"Aspect HUD");
         } else if (ctx->primaryClass == FILE_CLASS_PDF) {
-            wcscpy(descs[0].title, L"Rotate All"); wcscpy(descs[0].subtitle, L"90° CW");
-            wcscpy(descs[1].title, L"Split");      wcscpy(descs[1].subtitle, L"Pages");
-            wcscpy(descs[2].title, L"Merge");      wcscpy(descs[2].subtitle, L"Append");
-            wcscpy(descs[3].title, L"Organize");   wcscpy(descs[3].subtitle, L"Thumbnails");
+            wcscpy(descs[0].title, L"Organizer");   wcscpy(descs[0].subtitle, L"Visual HUD");
+            wcscpy(descs[1].title, L"Rotate 90°");  wcscpy(descs[1].subtitle, L"Clockwise");
+            wcscpy(descs[2].title, L"Rotate -90°"); wcscpy(descs[2].subtitle, L"Counter-CW");
+            wcscpy(descs[3].title, L"Split Pages"); wcscpy(descs[3].subtitle, L"Burst");
+            wcscpy(descs[4].title, L"Merge PDFs");  wcscpy(descs[4].subtitle, L"Combine");
         }
     } else if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
         if (ctx->primaryClass == FILE_CLASS_IMAGE) {
@@ -285,9 +295,10 @@ static void GetSubmenuSlices(MagifyContext *ctx, SliceDesc *descs, int maxCount)
             wcscpy(descs[2].title, L"Maximum");   wcscpy(descs[2].subtitle, L"60% Web");
             wcscpy(descs[3].title, L"< 200 KB");  wcscpy(descs[3].subtitle, L"Portal Fit");
         } else if (ctx->primaryClass == FILE_CLASS_PDF) {
-            wcscpy(descs[0].title, L"Print");     wcscpy(descs[0].subtitle, L"300 DPI");
-            wcscpy(descs[1].title, L"Balanced");  wcscpy(descs[1].subtitle, L"150 DPI");
-            wcscpy(descs[2].title, L"Extreme");   wcscpy(descs[2].subtitle, L"96 DPI");
+            wcscpy(descs[0].title, L"Light");    wcscpy(descs[0].subtitle, L"300 DPI");
+            wcscpy(descs[1].title, L"Balanced"); wcscpy(descs[1].subtitle, L"150 DPI");
+            wcscpy(descs[2].title, L"Extreme");  wcscpy(descs[2].subtitle, L"96 DPI");
+            wcscpy(descs[3].title, L"Back");     wcscpy(descs[3].subtitle, L"Return");
         } else {
             wcscpy(descs[0].title, L"Zip Deflate"); wcscpy(descs[0].subtitle, L"Standard");
         }
@@ -812,6 +823,8 @@ static void RenderFrame(MagifyContext *ctx) {
         RenderRenameHUD(ctx);
     } else if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
         RenderCropHUD(ctx);
+    } else if (ctx->uiState == UI_STATE_PDF_EDIT) {
+        RenderPdfOrganizerHUD(ctx);
     } else {
         RenderRadialMenu(ctx);
     }
@@ -902,10 +915,10 @@ static void ExecuteAction(MagifyContext *ctx, int slice) {
                     Magify_Image_Convert(file, exts[slice], ctx);
                 }
             } else if (ctx->primaryClass == FILE_CLASS_PDF) {
-                const WCHAR *exts[] = { L"JPG", L"PNG", L"TXT" };
-                if (slice >= 0 && slice < 3) {
-                    Magify_PDF_ConvertToImages(file, exts[slice], ctx);
-                }
+                if (slice == 0) Magify_PdfConvertToImages(ctx, L"JPG");
+                else if (slice == 1) Magify_PdfConvertToImages(ctx, L"PNG");
+                else if (slice == 2) Magify_PdfExtractText(ctx);
+                else { ctx->uiState = UI_STATE_RADIAL_ROOT; ctx->hoveredSlice = -1; }
             } else {
                 if (slice == 0) Magify_CompressGenericZip(ctx);
                 else { ctx->uiState = UI_STATE_RADIAL_ROOT; ctx->hoveredSlice = -1; }
@@ -918,10 +931,11 @@ static void ExecuteAction(MagifyContext *ctx, int slice) {
                 else if (slice == 3) Magify_Image_Resize(file, 0, 0, 50, ctx);
                 else if (slice == 4) InitCropHUD(ctx);
             } else if (ctx->primaryClass == FILE_CLASS_PDF) {
-                if (slice == 0) Magify_PDF_RotatePages(file, 90, ctx);
-                else if (slice == 1) Magify_PDF_ConvertToImages(file, L"SPLIT", ctx);
-                else if (slice == 2) Magify_PDF_Merge((const WCHAR**)ctx->files, ctx->fileCount, NULL, ctx);
-                else if (slice == 3) Magify_PDF_RotatePages(file, 0, ctx);
+                if (slice == 0) InitPdfOrganizerHUD(ctx);
+                else if (slice == 1) Magify_PdfRotateAll(ctx, 90);
+                else if (slice == 2) Magify_PdfRotateAll(ctx, 270);
+                else if (slice == 3) Magify_PdfSplit(ctx, L"BURST");
+                else if (slice == 4) Magify_PdfMerge(ctx, NULL);
             }
         } else if (ctx->activeSubmenu == SUBMENU_COMPRESS) {
             if (ctx->primaryClass == FILE_CLASS_IMAGE) {
@@ -930,10 +944,10 @@ static void ExecuteAction(MagifyContext *ctx, int slice) {
                     Magify_Image_Compress(file, quals[slice], ctx);
                 }
             } else if (ctx->primaryClass == FILE_CLASS_PDF) {
-                int dpis[] = { 300, 150, 96 };
-                if (slice >= 0 && slice < 3) {
-                    Magify_PDF_Compress(file, dpis[slice], ctx);
-                }
+                if (slice == 0) Magify_PdfCompress(ctx, 300);
+                else if (slice == 1) Magify_PdfCompress(ctx, 150);
+                else if (slice == 2) Magify_PdfCompress(ctx, 96);
+                else { ctx->uiState = UI_STATE_RADIAL_ROOT; ctx->hoveredSlice = -1; }
             } else {
                 Magify_CompressGenericZip(ctx);
             }
@@ -1107,6 +1121,469 @@ static void HandleCropMouseMove(MagifyContext *ctx, int mx, int my) {
     RenderFrame(ctx);
 }
 
+// -------------------------------------------------------------
+// Visual PDF Page Organizer HUD Implementation
+// -------------------------------------------------------------
+static void InitPdfOrganizerHUD(MagifyContext *ctx) {
+    if (ctx->pdfOrganizer) {
+        Magify_PdfOrganizer_Free((MagifyPdfOrganizerState*)ctx->pdfOrganizer);
+        ctx->pdfOrganizer = NULL;
+    }
+
+    MagifyPdfOrganizerState *org = Magify_PdfOrganizer_Init(ctx);
+    if (!org) {
+        swprintf(ctx->statusText, 128, L"Failed to load PDF pages");
+        return;
+    }
+
+    ctx->pdfOrganizer = (void*)org;
+    ctx->uiState = UI_STATE_PDF_EDIT;
+    ResizeOverlayWindow(ctx, 760, 580);
+    RenderFrame(ctx);
+}
+
+static void RenderPdfOrganizerHUD(MagifyContext *ctx) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    float s = (float)g_surfWidth / 760.0f;
+
+    // Background: Obsidian Glass
+    DrawRoundedBoxARGB(0, 0, g_surfWidth, g_surfHeight, 16.0f * s,
+                       18, 19, 26, 242,
+                       51, 65, 85, 255, 1.2f * s);
+
+    // Top Header Bar
+    const WCHAR *fileName = PathFindFileNameW(ctx->files[0]);
+    DrawCrispTextARGB(fileName, (int)(26 * s), (int)(28 * s), RGB(248, 250, 252), (int)(13 * s), FW_BOLD, 1.0f, TRUE);
+
+    int activePages = 0;
+    for (int p = 0; p < org->totalPages; p++) {
+        if (!org->pages[p].markedDeleted) activePages++;
+    }
+    WCHAR pageCountStr[32];
+    if (activePages == org->totalPages) {
+        swprintf(pageCountStr, 32, L"%d Pages", org->totalPages);
+    } else {
+        swprintf(pageCountStr, 32, L"%d / %d Pages", activePages, org->totalPages);
+    }
+    DrawRoundedBoxARGB((int)(220 * s), (int)(16 * s), (int)(95 * s), (int)(26 * s), 13.0f * s,
+                       15, 23, 42, 255, 6, 182, 212, 180, 1.0f * s);
+    DrawCrispTextARGB(pageCountStr, (int)(267 * s), (int)(28 * s), RGB(34, 211, 238), (int)(10 * s), FW_BOLD, 1.0f, FALSE);
+
+    // [+ Add PDF to Merge] button
+    DrawRoundedBoxARGB((int)(330 * s), (int)(16 * s), (int)(145 * s), (int)(26 * s), 13.0f * s,
+                       30, 41, 59, 230, 124, 58, 237, 180, 1.0f * s);
+    DrawCrispTextARGB(L"+ Add PDF to Merge", (int)(402 * s), (int)(28 * s), RGB(226, 232, 240), (int)(9 * s), FW_BOLD, 1.0f, FALSE);
+
+    // [Split Range] button
+    DrawRoundedBoxARGB((int)(490 * s), (int)(16 * s), (int)(105 * s), (int)(26 * s), 13.0f * s,
+                       30, 41, 59, 230, 51, 65, 85, 160, 1.0f * s);
+    DrawCrispTextARGB(L"Split Range", (int)(542 * s), (int)(28 * s), RGB(226, 232, 240), (int)(9 * s), FW_NORMAL, 1.0f, FALSE);
+
+    // Close button (X)
+    DrawRoundedBoxARGB((int)(700 * s), (int)(16 * s), (int)(32 * s), (int)(26 * s), 13.0f * s,
+                       30, 41, 59, 220, 244, 63, 94, 180, 1.0f * s);
+    DrawCrispTextARGB(L"✕", (int)(716 * s), (int)(28 * s), RGB(244, 63, 94), (int)(11 * s), FW_BOLD, 1.0f, FALSE);
+
+    // 4 Columns layout
+    int colX[4] = { (int)(46 * s), (int)(222 * s), (int)(398 * s), (int)(574 * s) };
+    int cardW = (int)(140 * s);
+    int cardH = (int)(180 * s);
+    int rowH  = (int)(206 * s);
+
+    for (int i = 0; i < org->totalPages; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int cardX = colX[col];
+        int cardY = (int)(62 * s) + row * rowH - org->scrollOffsetY;
+
+        if (cardY + cardH < (int)(54 * s) || cardY > (int)(520 * s)) continue;
+
+        BOOL isHovered = (org->hoverPageIndex == i);
+        uint8_t bdrR = isHovered ? 6 : 51;
+        uint8_t bdrG = isHovered ? 182 : 65;
+        uint8_t bdrB = isHovered ? 212 : 85;
+        uint8_t bdrA = isHovered ? 255 : 160;
+
+        uint8_t bgR = isHovered ? 36 : 28;
+        uint8_t bgG = isHovered ? 38 : 30;
+        uint8_t bgB = isHovered ? 52 : 44;
+
+        DrawRoundedBoxARGB(cardX, cardY, cardW, cardH, 10.0f * s,
+                           bgR, bgG, bgB, 240,
+                           bdrR, bdrG, bdrB, bdrA, isHovered ? (1.5f * s) : (1.0f * s));
+
+        // Thumbnail blit inside card
+        if (org->pages[i].thumbPixels) {
+            int tW = org->pages[i].thumbW;
+            int tH = org->pages[i].thumbH;
+            int rot = (org->pages[i].currentRotation + org->pages[i].addedRotation) % 360;
+
+            int dstX0 = cardX + (int)(10 * s);
+            int dstY0 = cardY + (int)(22 * s);
+            int dw = (int)(120 * s);
+            int dh = (int)(136 * s);
+
+            for (int dy = 0; dy < dh; dy++) {
+                int py = dstY0 + dy;
+                if (py < (int)(56 * s) || py >= (int)(518 * s) || py >= g_surfHeight) continue;
+
+                for (int dx = 0; dx < dw; dx++) {
+                    int px = dstX0 + dx;
+                    if (px < 0 || px >= g_surfWidth) continue;
+
+                    int sx = (dx * tW) / dw;
+                    int sy = (dy * tH) / dh;
+                    if (rot == 90) {
+                        int tmp = sx;
+                        sx = (dy * tW) / dh;
+                        sy = tH - 1 - (tmp * tH) / dw;
+                    } else if (rot == 180) {
+                        sx = tW - 1 - sx;
+                        sy = tH - 1 - sy;
+                    } else if (rot == 270) {
+                        int tmp = sx;
+                        sx = tW - 1 - (dy * tW) / dh;
+                        sy = (tmp * tH) / dw;
+                    }
+
+                    if (sx >= 0 && sx < tW && sy >= 0 && sy < tH) {
+                        uint32_t srcP = org->pages[i].thumbPixels[sy * tW + sx];
+                        g_pixels[py * g_surfWidth + px] = srcP;
+                    }
+                }
+            }
+        }
+
+        // Page number pill
+        WCHAR numStr[32];
+        if (org->pages[i].sourceDocIndex > 0) {
+            swprintf(numStr, 32, L"P%d (D%d)", i + 1, org->pages[i].sourceDocIndex + 1);
+        } else {
+            swprintf(numStr, 32, L"Page %d", i + 1);
+        }
+        DrawRoundedBoxARGB(cardX + (int)(6 * s), cardY + (int)(6 * s), (int)(56 * s), (int)(16 * s), 5.0f * s,
+                           15, 23, 42, 230, 71, 85, 105, 180, 1.0f * s);
+        DrawCrispTextARGB(numStr, cardX + (int)(34 * s), cardY + (int)(14 * s), RGB(226, 232, 240), (int)(9 * s), FW_BOLD, 1.0f, FALSE);
+
+        // Deleted overlay
+        if (org->pages[i].markedDeleted) {
+            DrawRoundedBoxARGB(cardX, cardY, cardW, cardH, 10.0f * s,
+                               244, 63, 94, 160,
+                               244, 63, 94, 255, 1.5f * s);
+            DrawCrispTextARGB(L"✕ DELETED", cardX + cardW / 2, cardY + cardH / 2, RGB(255, 255, 255), (int)(12 * s), FW_BOLD, 1.0f, FALSE);
+        }
+
+        // Mini action pills (CCW, CW, Delete)
+        if (isHovered && !org->isDragging) {
+            int pillY = cardY + (int)(154 * s);
+            int hp = org->hoverPillIndex;
+
+            // CCW
+            DrawRoundedBoxARGB(cardX + (int)(12 * s), pillY, (int)(34 * s), (int)(20 * s), 6.0f * s,
+                               (hp == 0) ? 124 : 30, (hp == 0) ? 58 : 41, (hp == 0) ? 237 : 59, 230,
+                               148, 163, 184, 180, 1.0f * s);
+            DrawCrispTextARGB(L"↺", cardX + (int)(29 * s), pillY + (int)(10 * s), RGB(248, 250, 252), (int)(10 * s), FW_BOLD, 1.0f, FALSE);
+
+            // CW
+            DrawRoundedBoxARGB(cardX + (int)(53 * s), pillY, (int)(34 * s), (int)(20 * s), 6.0f * s,
+                               (hp == 1) ? 124 : 30, (hp == 1) ? 58 : 41, (hp == 1) ? 237 : 59, 230,
+                               148, 163, 184, 180, 1.0f * s);
+            DrawCrispTextARGB(L"↻", cardX + (int)(70 * s), pillY + (int)(10 * s), RGB(248, 250, 252), (int)(10 * s), FW_BOLD, 1.0f, FALSE);
+
+            // Delete / Restore
+            DrawRoundedBoxARGB(cardX + (int)(94 * s), pillY, (int)(34 * s), (int)(20 * s), 6.0f * s,
+                               (hp == 2) ? 244 : 30, (hp == 2) ? 63 : 41, (hp == 2) ? 94 : 59, 230,
+                               (hp == 2) ? 255 : 148, (hp == 2) ? 255 : 163, (hp == 2) ? 255 : 184, 180, 1.0f * s);
+            DrawCrispTextARGB(L"✕", cardX + (int)(111 * s), pillY + (int)(10 * s), RGB(248, 250, 252), (int)(10 * s), FW_BOLD, 1.0f, FALSE);
+        }
+    }
+
+    // Drag indicator & floating card
+    if (org->isDragging && org->dragPageIndex >= 0) {
+        if (org->dragTargetIndex >= 0 && org->dragTargetIndex <= org->totalPages) {
+            int slotCol = org->dragTargetIndex % 4;
+            int slotRow = org->dragTargetIndex / 4;
+            int insertX = (org->dragTargetIndex == org->totalPages && slotCol == 0)
+                        ? colX[3] + cardW + (int)(8 * s)
+                        : colX[slotCol] - (int)(6 * s);
+            int insertY = (int)(62 * s) + slotRow * rowH - org->scrollOffsetY;
+
+            if (insertY >= (int)(50 * s) && insertY + cardH <= (int)(530 * s)) {
+                DrawRoundedBoxARGB(insertX, insertY, (int)(5 * s), cardH, 2.0f * s,
+                                   34, 211, 238, 255, 6, 182, 212, 255, 1.0f * s);
+            }
+        }
+
+        int floatX = org->dragMousePos.x - (cardW / 2);
+        int floatY = org->dragMousePos.y - (cardH / 2);
+        DrawRoundedBoxARGB(floatX, floatY, cardW, cardH, 10.0f * s,
+                           30, 41, 59, 210,
+                           34, 211, 238, 255, 2.0f * s);
+        WCHAR dragStr[32];
+        swprintf(dragStr, 32, L"Page %d", org->dragPageIndex + 1);
+        DrawCrispTextARGB(dragStr, floatX + cardW / 2, floatY + cardH / 2, RGB(255, 255, 255), (int)(12 * s), FW_BOLD, 1.0f, FALSE);
+    }
+
+    // Bottom Action Bar
+    DrawRoundedBoxARGB((int)(24 * s), (int)(528 * s), g_surfWidth - (int)(48 * s), (int)(42 * s), 10.0f * s,
+                       15, 23, 42, 235,
+                       51, 65, 85, 180, 1.0f * s);
+
+    // [Rotate All 90° CW]
+    DrawRoundedBoxARGB((int)(36 * s), (int)(533 * s), (int)(145 * s), (int)(32 * s), 8.0f * s,
+                       30, 41, 59, 220, 71, 85, 105, 180, 1.0f * s);
+    DrawCrispTextARGB(L"Rotate All 90° CW", (int)(108 * s), (int)(549 * s), RGB(226, 232, 240), (int)(9 * s), FW_BOLD, 1.0f, FALSE);
+
+    // [Burst All Pages]
+    DrawRoundedBoxARGB((int)(190 * s), (int)(533 * s), (int)(130 * s), (int)(32 * s), 8.0f * s,
+                       30, 41, 59, 220, 71, 85, 105, 180, 1.0f * s);
+    DrawCrispTextARGB(L"Burst All Pages", (int)(255 * s), (int)(549 * s), RGB(226, 232, 240), (int)(9 * s), FW_BOLD, 1.0f, FALSE);
+
+    // [Cancel (Esc)]
+    DrawRoundedBoxARGB((int)(475 * s), (int)(533 * s), (int)(95 * s), (int)(32 * s), 8.0f * s,
+                       51, 65, 85, 220, 71, 85, 105, 180, 1.0f * s);
+    DrawCrispTextARGB(L"Cancel (Esc)", (int)(522 * s), (int)(549 * s), RGB(203, 213, 225), (int)(9 * s), FW_NORMAL, 1.0f, FALSE);
+
+    // [Save PDF (Enter)]
+    DrawRoundedBoxARGB((int)(580 * s), (int)(533 * s), (int)(136 * s), (int)(32 * s), 8.0f * s,
+                       16, 185, 129, 240, 5, 150, 105, 255, 1.2f * s);
+    DrawCrispTextARGB(L"Save PDF (Enter)", (int)(648 * s), (int)(549 * s), RGB(255, 255, 255), (int)(10 * s), FW_BOLD, 1.0f, FALSE);
+}
+
+static void HandlePdfOrganizerMouseMove(MagifyContext *ctx, int mx, int my) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    float s = (float)g_surfWidth / 760.0f;
+    int colX[4] = { (int)(46 * s), (int)(222 * s), (int)(398 * s), (int)(574 * s) };
+    int cardW = (int)(140 * s);
+    int cardH = (int)(180 * s);
+    int rowH  = (int)(206 * s);
+
+    if (org->isDragging) {
+        org->dragMousePos = (POINT){ mx, my };
+        int col = (mx - (int)(46 * s) + (cardW / 2)) / (cardW + (int)(36 * s));
+        if (col < 0) col = 0;
+        if (col > 3) col = 3;
+        int row = (my - (int)(62 * s) + org->scrollOffsetY + (rowH / 2)) / rowH;
+        if (row < 0) row = 0;
+        int target = row * 4 + col;
+        if (target > org->totalPages) target = org->totalPages;
+        org->dragTargetIndex = target;
+        RenderFrame(ctx);
+        return;
+    }
+
+    int foundPage = -1;
+    int foundPill = -1;
+
+    for (int i = 0; i < org->totalPages; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int cardX = colX[col];
+        int cardY = (int)(62 * s) + row * rowH - org->scrollOffsetY;
+
+        if (cardY + cardH < (int)(54 * s) || cardY > (int)(520 * s)) continue;
+
+        if (mx >= cardX && mx <= cardX + cardW && my >= cardY && my <= cardY + cardH) {
+            foundPage = i;
+            int pillY = cardY + (int)(154 * s);
+            if (my >= pillY && my <= pillY + (int)(20 * s)) {
+                if (mx >= cardX + (int)(12 * s) && mx <= cardX + (int)(46 * s)) foundPill = 0;
+                else if (mx >= cardX + (int)(53 * s) && mx <= cardX + (int)(87 * s)) foundPill = 1;
+                else if (mx >= cardX + (int)(94 * s) && mx <= cardX + (int)(128 * s)) foundPill = 2;
+            }
+            break;
+        }
+    }
+
+    if (foundPage != org->hoverPageIndex || foundPill != org->hoverPillIndex) {
+        org->hoverPageIndex = foundPage;
+        org->hoverPillIndex = foundPill;
+        RenderFrame(ctx);
+    }
+}
+
+static void HandlePdfOrganizerMouseDown(MagifyContext *ctx, int mx, int my) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    float s = (float)g_surfWidth / 760.0f;
+
+    // [+ Add PDF to Merge]
+    if (mx >= (int)(330 * s) && mx <= (int)(475 * s) && my >= (int)(16 * s) && my <= (int)(42 * s)) {
+        WCHAR addPath[MAX_PATH] = {0};
+        OPENFILENAMEW ofn;
+        memset(&ofn, 0, sizeof(ofn));
+        ofn.lStructSize = sizeof(OPENFILENAMEW);
+        ofn.hwndOwner = ctx->hwndOverlay;
+        ofn.lpstrFilter = L"PDF Files (*.pdf)\0*.pdf\0All Files (*.*)\0*.*\0";
+        ofn.lpstrFile = addPath;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        if (GetOpenFileNameW(&ofn)) {
+            Magify_PdfOrganizer_AddDoc(org, addPath);
+            RenderFrame(ctx);
+        }
+        return;
+    }
+
+    // [Split Range]
+    if (mx >= (int)(490 * s) && mx <= (int)(595 * s) && my >= (int)(16 * s) && my <= (int)(42 * s)) {
+        Magify_PdfSplit(ctx, L"BURST");
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+        return;
+    }
+
+    // Close button (X) or Cancel
+    if ((mx >= (int)(700 * s) && mx <= (int)(732 * s) && my >= (int)(16 * s) && my <= (int)(42 * s)) ||
+        (mx >= (int)(475 * s) && mx <= (int)(570 * s) && my >= (int)(533 * s) && my <= (int)(565 * s))) {
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+        RenderFrame(ctx);
+        return;
+    }
+
+    // [Rotate All 90° CW]
+    if (mx >= (int)(36 * s) && mx <= (int)(181 * s) && my >= (int)(533 * s) && my <= (int)(565 * s)) {
+        for (int p = 0; p < org->totalPages; p++) {
+            if (!org->pages[p].markedDeleted) {
+                org->pages[p].addedRotation = (org->pages[p].addedRotation + 90) % 360;
+            }
+        }
+        RenderFrame(ctx);
+        return;
+    }
+
+    // [Burst All Pages]
+    if (mx >= (int)(190 * s) && mx <= (int)(320 * s) && my >= (int)(533 * s) && my <= (int)(565 * s)) {
+        Magify_PdfSplit(ctx, L"BURST");
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+        return;
+    }
+
+    // [Save PDF (Enter)]
+    if (mx >= (int)(580 * s) && mx <= (int)(716 * s) && my >= (int)(533 * s) && my <= (int)(565 * s)) {
+        Magify_PdfApplyOrganizerChanges(ctx, org);
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+        return;
+    }
+
+    // Card interactions
+    int colX[4] = { (int)(46 * s), (int)(222 * s), (int)(398 * s), (int)(574 * s) };
+    int cardW = (int)(140 * s);
+    int cardH = (int)(180 * s);
+    int rowH  = (int)(206 * s);
+
+    for (int i = 0; i < org->totalPages; i++) {
+        int col = i % 4;
+        int row = i / 4;
+        int cardX = colX[col];
+        int cardY = (int)(62 * s) + row * rowH - org->scrollOffsetY;
+
+        if (cardY + cardH < (int)(54 * s) || cardY > (int)(520 * s)) continue;
+
+        if (mx >= cardX && mx <= cardX + cardW && my >= cardY && my <= cardY + cardH) {
+            int pillY = cardY + (int)(154 * s);
+            if (my >= pillY && my <= pillY + (int)(20 * s)) {
+                if (mx >= cardX + (int)(12 * s) && mx <= cardX + (int)(46 * s)) {
+                    org->pages[i].addedRotation = (org->pages[i].addedRotation + 270) % 360;
+                    RenderFrame(ctx);
+                    return;
+                } else if (mx >= cardX + (int)(53 * s) && mx <= cardX + (int)(87 * s)) {
+                    org->pages[i].addedRotation = (org->pages[i].addedRotation + 90) % 360;
+                    RenderFrame(ctx);
+                    return;
+                } else if (mx >= cardX + (int)(94 * s) && mx <= cardX + (int)(128 * s)) {
+                    org->pages[i].markedDeleted = !org->pages[i].markedDeleted;
+                    RenderFrame(ctx);
+                    return;
+                }
+            }
+
+            // Start drag
+            org->isDragging = TRUE;
+            org->dragPageIndex = i;
+            org->dragTargetIndex = i;
+            org->dragMousePos = (POINT){ mx, my };
+            SetCapture(ctx->hwndOverlay);
+            RenderFrame(ctx);
+            return;
+        }
+    }
+}
+
+static void HandlePdfOrganizerMouseUp(MagifyContext *ctx) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    if (org->isDragging) {
+        org->isDragging = FALSE;
+        ReleaseCapture();
+
+        if (org->dragTargetIndex >= 0 && org->dragTargetIndex < org->totalPages &&
+            org->dragTargetIndex != org->dragPageIndex) {
+            MagifyPdfPageInfo temp = org->pages[org->dragPageIndex];
+            if (org->dragPageIndex < org->dragTargetIndex) {
+                for (int k = org->dragPageIndex; k < org->dragTargetIndex; k++) {
+                    org->pages[k] = org->pages[k + 1];
+                }
+            } else {
+                for (int k = org->dragPageIndex; k > org->dragTargetIndex; k--) {
+                    org->pages[k] = org->pages[k - 1];
+                }
+            }
+            org->pages[org->dragTargetIndex] = temp;
+        }
+
+        org->dragPageIndex = -1;
+        org->dragTargetIndex = -1;
+        RenderFrame(ctx);
+    }
+}
+
+static void HandlePdfOrganizerMouseWheel(MagifyContext *ctx, int delta) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    org->scrollOffsetY -= (delta / 120) * 50;
+    if (org->scrollOffsetY < 0) org->scrollOffsetY = 0;
+    if (org->scrollOffsetY > org->maxScrollY) org->scrollOffsetY = org->maxScrollY;
+    RenderFrame(ctx);
+}
+
+static void HandlePdfOrganizerKeyDown(MagifyContext *ctx, WPARAM wParam) {
+    MagifyPdfOrganizerState *org = (MagifyPdfOrganizerState*)ctx->pdfOrganizer;
+    if (!org) return;
+
+    if (wParam == VK_ESCAPE) {
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+        RenderFrame(ctx);
+    } else if (wParam == VK_RETURN) {
+        Magify_PdfApplyOrganizerChanges(ctx, org);
+        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+        Magify_PdfOrganizer_Free(org);
+        ctx->pdfOrganizer = NULL;
+        ctx->uiState = UI_STATE_RADIAL_ROOT;
+    }
+}
+
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     MagifyContext *ctx = (MagifyContext*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
 
@@ -1151,6 +1628,15 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             return 0;
         }
 
+        case WM_MOUSEWHEEL: {
+            if (ctx->uiState == UI_STATE_PDF_EDIT) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                HandlePdfOrganizerMouseWheel(ctx, delta);
+                return 0;
+            }
+            return 0;
+        }
+
         case WM_MOUSEMOVE: {
             if (ctx->isClosing) return 0;
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
@@ -1161,6 +1647,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
                 HandleCropMouseMove(ctx, mx, my);
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_PDF_EDIT) {
+                HandlePdfOrganizerMouseMove(ctx, mx, my);
                 return 0;
             }
 
@@ -1196,6 +1687,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             if (ctx->uiState == UI_STATE_IMAGE_EDIT) {
                 HandleCropMouseDown(ctx, mx, my);
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_PDF_EDIT) {
+                HandlePdfOrganizerMouseDown(ctx, mx, my);
                 return 0;
             }
 
@@ -1254,6 +1750,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                     ctx->cropDragMode = -1;
                     ReleaseCapture();
                 }
+                return 0;
+            }
+
+            if (ctx->uiState == UI_STATE_PDF_EDIT) {
+                HandlePdfOrganizerMouseUp(ctx);
                 return 0;
             }
 
@@ -1443,6 +1944,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 return 0;
             }
 
+            if (ctx->uiState == UI_STATE_PDF_EDIT) {
+                HandlePdfOrganizerKeyDown(ctx, wParam);
+                return 0;
+            }
+
             if (wParam == VK_ESCAPE) {
                 if (ctx->uiState == UI_STATE_RADIAL_SUB) {
                     ctx->uiState = UI_STATE_RADIAL_ROOT;
@@ -1473,6 +1979,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         }
 
         case WM_DESTROY: {
+            if (ctx && ctx->pdfOrganizer) {
+                Magify_PdfOrganizer_Free((MagifyPdfOrganizerState*)ctx->pdfOrganizer);
+                ctx->pdfOrganizer = NULL;
+            }
             if (ctx && ctx->cropPreviewPixels) {
                 free(ctx->cropPreviewPixels);
                 ctx->cropPreviewPixels = NULL;

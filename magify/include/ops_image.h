@@ -70,6 +70,7 @@ GpStatus WINGDIPAPI GdiplusStartup(ULONG_PTR *token, const GdiplusStartupInput *
 void     WINGDIPAPI GdiplusShutdown(ULONG_PTR token);
 
 GpStatus WINGDIPAPI GdipCreateBitmapFromFile(const WCHAR *filename, GpBitmap **bitmap);
+GpStatus WINGDIPAPI GdipCreateBitmapFromStream(IStream *stream, GpBitmap **bitmap);
 GpStatus WINGDIPAPI GdipCreateBitmapFromScan0(int width, int height, int stride, int format, BYTE *scan0, GpBitmap **bitmap);
 GpStatus WINGDIPAPI GdipDisposeImage(GpImage *image);
 GpStatus WINGDIPAPI GdipCloneBitmapAreaI(int x, int y, int width, int height, int format, GpBitmap *src, GpBitmap **dst);

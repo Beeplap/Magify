@@ -2,7 +2,7 @@ CC ?= gcc
 WINDRES ?= windres
 
 CFLAGS = -std=c11 -O3 -Wall -Wextra -municode -mwindows -Iinclude -Ithird_party
-LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -ladvapi32 -lgdiplus
+LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
 
 SRCS = src/main.c src/ipc.c src/registry.c src/ui_overlay.c \
        src/ops_common.c src/ops_image.c src/ops_pdf.c
@@ -37,7 +37,7 @@ uninstall: $(TARGET)
 	$(TARGET) --uninstall
 
 test: $(TARGET)
-	$(CC) -std=c11 -O3 -Wall -Wextra -municode -Iinclude -Ithird_party tests/test_core.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -ladvapi32 -lgdiplus -o build/test_core.exe
+	$(CC) -std=c11 -O3 -Wall -Wextra -municode -Iinclude -Ithird_party tests/test_core.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
 	build/test_core.exe
 
 .PHONY: all clean install uninstall test

@@ -2,6 +2,7 @@
 #include "ui_overlay.h"
 #include "ops_common.h"
 #include "ops_image.h"
+#include "ops_pdf.h"
 #include <stdio.h>
 #include <assert.h>
 #include <shlwapi.h>
@@ -185,10 +186,169 @@ int wmain(void) {
     printf("  Generated PDF: %ls (Header: %.*s, Size: %llu bytes)\n",
            pdfOut, 8, pdfHdr, (unsigned long long)Magify_GetFileSize(pdfOut));
 
+    // ---------------------------------------------------------
+    // 8. Multi-Page PDF Generation (Test Fixture)
+    // ---------------------------------------------------------
+    printf("\n[8/14] Generating Multi-Page Test PDF with Embedded Streams...\n");
+    const WCHAR *multiPagesIn[3] = {
+        L"test_assets\\test_pattern_converted.png",
+        L"test_assets\\sample.png",
+        L"test_assets\\test_pattern_converted_cropped.png"
+    };
+    const WCHAR *multiPdfOut = L"test_assets\\sample_multi.pdf";
+    DeleteFileW(multiPdfOut);
+    Magify_ImagesToPDF(multiPagesIn, 3, multiPdfOut, &imgCtx);
+    for (int t = 0; t < 50; t++) {
+        if (GetFileAttributesW(multiPdfOut) != INVALID_FILE_ATTRIBUTES) break;
+        Sleep(20);
+    }
+    assert(GetFileAttributesW(multiPdfOut) != INVALID_FILE_ATTRIBUTES);
+    printf("  Created 3-page test PDF: %ls (%llu bytes)\n",
+           multiPdfOut, (unsigned long long)Magify_GetFileSize(multiPdfOut));
+
+    // ---------------------------------------------------------
+    // 9. Fast In-Memory PDF Object & Page-Tree Parser
+    // ---------------------------------------------------------
+    printf("\n[9/14] Testing In-Memory PDF Object & Page-Tree Engine...\n");
+    MagifyPdfDoc *doc = Magify_PdfDoc_Open(multiPdfOut);
+    assert(doc != NULL);
+    printf("  Parsed PDF: %d objects, %d pages detected\n", doc->objectCount, doc->pageCount);
+    assert(doc->pageCount == 3);
+    for (int i = 0; i < doc->pageCount; i++) {
+        printf("    Page %d: ObjId=%d, Rot=%d, Size=%.0fx%.0f pt\n",
+               i + 1, doc->pages[i].pageObjectId, doc->pages[i].currentRotation,
+               doc->pages[i].widthPt, doc->pages[i].heightPt);
+        assert(doc->pages[i].pageObjectId > 0);
+        assert(doc->pages[i].widthPt > 50.0f && doc->pages[i].heightPt > 50.0f);
+    }
+    Magify_PdfDoc_Close(doc);
+
+    // ---------------------------------------------------------
+    // 10. Lossless Structural PDF Rotation
+    // ---------------------------------------------------------
+    printf("\n[10/14] Testing Lossless Structural PDF Rotation (90° CW)...\n");
+    const WCHAR *rotOut = L"test_assets\\sample_multi_rot90.pdf";
+    DeleteFileW(rotOut);
+    BOOL rotOk = Magify_PdfRotateAllSync(multiPdfOut, rotOut, 90);
+    assert(rotOk);
+    assert(GetFileAttributesW(rotOut) != INVALID_FILE_ATTRIBUTES);
+
+    MagifyPdfDoc *docRot = Magify_PdfDoc_Open(rotOut);
+    assert(docRot != NULL);
+    assert(docRot->pageCount == 3);
+    for (int i = 0; i < docRot->pageCount; i++) {
+        assert(docRot->pages[i].currentRotation == 90);
+    }
+    printf("  Lossless 90° rotation verified on all %d pages.\n", docRot->pageCount);
+    Magify_PdfDoc_Close(docRot);
+
+    // ---------------------------------------------------------
+    // 11. Multi-PDF Merge Engine
+    // ---------------------------------------------------------
+    printf("\n[11/14] Testing Multi-PDF Merge Engine...\n");
+    const WCHAR *mergeList[2] = { multiPdfOut, rotOut };
+    const WCHAR *mergeOut = L"test_assets\\sample_multi_merged.pdf";
+    DeleteFileW(mergeOut);
+    BOOL mergeOk = Magify_PdfMergeSync(mergeList, 2, mergeOut);
+    assert(mergeOk);
+    assert(GetFileAttributesW(mergeOut) != INVALID_FILE_ATTRIBUTES);
+
+    MagifyPdfDoc *docMerged = Magify_PdfDoc_Open(mergeOut);
+    assert(docMerged != NULL);
+    printf("  Merged PDF contains %d pages (expected 3 + 3 = 6)\n", docMerged->pageCount);
+    assert(docMerged->pageCount == 6);
+    Magify_PdfDoc_Close(docMerged);
+
+    // ---------------------------------------------------------
+    // 12. Lossless PDF Split (Custom Range & Burst)
+    // ---------------------------------------------------------
+    printf("\n[12/14] Testing Lossless PDF Split (Range & Burst)...\n");
+    const WCHAR *splitOut = L"test_assets\\sample_split.pdf";
+    DeleteFileW(splitOut);
+    BOOL splitRangeOk = Magify_PdfSplitSync(multiPdfOut, L"1-2", splitOut);
+    assert(splitRangeOk);
+
+    MagifyPdfDoc *docSplit = Magify_PdfDoc_Open(splitOut);
+    assert(docSplit != NULL);
+    printf("  Custom range '1-2' extracted: %d pages\n", docSplit->pageCount);
+    assert(docSplit->pageCount == 2);
+    Magify_PdfDoc_Close(docSplit);
+
+    // Burst all pages
+    BOOL burstOk = Magify_PdfSplitSync(multiPdfOut, L"BURST", NULL);
+    assert(burstOk);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_001.pdf") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_002.pdf") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_003.pdf") != INVALID_FILE_ATTRIBUTES);
+    printf("  Burst operation verified: page_001.pdf, page_002.pdf, page_003.pdf exist.\n");
+
+    // ---------------------------------------------------------
+    // 13. PDF Stream Compression
+    // ---------------------------------------------------------
+    printf("\n[13/14] Testing PDF Stream Compression & Downsampling...\n");
+    const WCHAR *compOut = L"test_assets\\sample_multi_compressed.pdf";
+    DeleteFileW(compOut);
+    int savingsPct = 0;
+    BOOL compOk = Magify_PdfCompressSync(multiPdfOut, compOut, 96, &savingsPct);
+    assert(compOk);
+    assert(GetFileAttributesW(compOut) != INVALID_FILE_ATTRIBUTES);
+    uint64_t origSz = Magify_GetFileSize(multiPdfOut);
+    uint64_t newSz = Magify_GetFileSize(compOut);
+    printf("  Compressed PDF size: %llu -> %llu bytes (Savings: %d%%)\n",
+           (unsigned long long)origSz, (unsigned long long)newSz, savingsPct);
+    MagifyPdfDoc *docComp = Magify_PdfDoc_Open(compOut);
+    assert(docComp != NULL && docComp->pageCount == 3);
+    Magify_PdfDoc_Close(docComp);
+
+    // ---------------------------------------------------------
+    // 14. Visual Page Organizer HUD State & Changes Application
+    // ---------------------------------------------------------
+    printf("\n[14/14] Testing Visual Page Organizer State & Changes Application...\n");
+    MagifyContext orgCtx;
+    memset(&orgCtx, 0, sizeof(orgCtx));
+    wcscpy(orgCtx.files[0], multiPdfOut);
+    orgCtx.fileCount = 1;
+
+    MagifyPdfOrganizerState *org = Magify_PdfOrganizer_Init(&orgCtx);
+    assert(org != NULL);
+    assert(org->totalPages == 3);
+
+    // Render thumbnail verification
+    uint32_t thumbBuf[120 * 160];
+    BOOL thumbOk = Magify_PdfDoc_RenderThumbnail(org->primaryDoc, 0, 120, 160, thumbBuf);
+    assert(thumbOk);
+    printf("  Rendered 120x160 thumbnail successfully (first pixel: 0x%08X)\n", thumbBuf[0]);
+
+    // Simulate page reorder: move page 0 to index 2
+    MagifyPdfPageInfo p0 = org->pages[0];
+    org->pages[0] = org->pages[1];
+    org->pages[1] = org->pages[2];
+    org->pages[2] = p0;
+
+    // Simulate page rotation: page 1 +90 deg
+    org->pages[1].addedRotation = 90;
+
+    // Simulate page deletion: mark page 2 deleted
+    org->pages[2].markedDeleted = TRUE;
+
+    // Apply changes
+    const WCHAR *orgEditedOut = L"test_assets\\sample_multi_edited.pdf";
+    DeleteFileW(orgEditedOut);
+    BOOL applyOk = Magify_PdfApplyOrganizerChanges(&orgCtx, org);
+    assert(applyOk);
+    assert(GetFileAttributesW(orgEditedOut) != INVALID_FILE_ATTRIBUTES);
+
+    MagifyPdfDoc *docEdited = Magify_PdfDoc_Open(orgEditedOut);
+    assert(docEdited != NULL);
+    printf("  Organizer saved: %d active pages (page 3 successfully excluded)\n", docEdited->pageCount);
+    assert(docEdited->pageCount == 2);
+    Magify_PdfDoc_Close(docEdited);
+    Magify_PdfOrganizer_Free(org);
+
     Magify_Image_Shutdown();
 
     printf("\n====================================================\n");
-    printf("  ✨ ALL 7 TEST SUITES PASSED WITH 100%% SUCCESS!   \n");
+    printf("  ✨ ALL 14 TEST SUITES PASSED WITH 100%% SUCCESS!  \n");
     printf("====================================================\n");
     return 0;
 }
