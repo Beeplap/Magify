@@ -54,7 +54,28 @@ static void InitPdfiumBridge(void) {
     if (g_pdfiumAttempted) return;
     g_pdfiumAttempted = TRUE;
 
-    g_hPdfium = LoadLibraryW(L"pdfium.dll");
+    // 1. Check directory where current executable is located
+    WCHAR exeDir[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exeDir, MAX_PATH)) {
+        PathRemoveFileSpecW(exeDir);
+        WCHAR dllPath[MAX_PATH];
+        swprintf(dllPath, MAX_PATH, L"%ls\\pdfium.dll", exeDir);
+        g_hPdfium = LoadLibraryW(dllPath);
+    }
+
+    // 2. Check %LOCALAPPDATA%\Programs\Magify\pdfium.dll
+    if (!g_hPdfium) {
+        WCHAR appData[MAX_PATH];
+        if (ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\Magify\\pdfium.dll", appData, MAX_PATH)) {
+            g_hPdfium = LoadLibraryW(appData);
+        }
+    }
+
+    // 3. Fallback to standard LoadLibraryW search order
+    if (!g_hPdfium) {
+        g_hPdfium = LoadLibraryW(L"pdfium.dll");
+    }
+
     if (!g_hPdfium) return;
 
     pFPDF_InitLibrary       = (FPDF_InitLibrary_fn)GetProcAddress(g_hPdfium, "FPDF_InitLibrary");
@@ -1181,7 +1202,7 @@ BOOL Magify_PdfDoc_RenderThumbnail(MagifyPdfDoc *doc, int pageIdx, int targetW, 
                 if (pBmp) {
                     pFPDFBitmap_FillRect(pBmp, 0, 0, targetW, targetH, 0xFFFFFFFF);
                     int rot = (doc->pages[pageIdx].currentRotation + doc->pages[pageIdx].addedRotation) % 360;
-                    pFPDF_RenderPageBitmap(pBmp, pPage, 0, 0, targetW, targetH, rot / 90, 0x10);
+                    pFPDF_RenderPageBitmap(pBmp, pPage, 0, 0, targetW, targetH, rot / 90, 0x01);
                     pFPDFBitmap_Destroy(pBmp);
                     pFPDF_ClosePage(pPage);
                     pFPDF_CloseDocument(pDoc);
@@ -1224,11 +1245,25 @@ BOOL Magify_PdfDoc_RenderThumbnail(MagifyPdfDoc *doc, int pageIdx, int targetW, 
         const uint8_t *sData = doc->data + doc->objects[foundImgId].streamOffset;
         size_t sLen = doc->objects[foundImgId].streamLength;
 
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sLen);
+        // If zlib/Flate wrapped, decompress first
+        const uint8_t *decData = sData;
+        size_t decLen = sLen;
+        void *pHeapDecomp = NULL;
+        if (sLen > 2 && sData[0] == 0x78) {
+            size_t uncompLen = 0;
+            pHeapDecomp = tinfl_decompress_mem_to_heap(sData, sLen, &uncompLen, TINFL_FLAG_PARSE_ZLIB_HEADER);
+            if (pHeapDecomp && uncompLen > 0) {
+                decData = (const uint8_t*)pHeapDecomp;
+                decLen = uncompLen;
+            }
+        }
+
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, decLen);
         if (hMem) {
             void *pLock = GlobalLock(hMem);
-            memcpy(pLock, sData, sLen);
+            memcpy(pLock, decData, decLen);
             GlobalUnlock(hMem);
+            if (pHeapDecomp) { free(pHeapDecomp); pHeapDecomp = NULL; }
 
             IStream *pStream = NULL;
             if (CreateStreamOnHGlobal(hMem, TRUE, &pStream) == S_OK) {
@@ -1722,8 +1757,11 @@ static DWORD WINAPI WorkerConvertToImages(void *arg) {
     swprintf(outDir, MAX_PATH, L"%ls\\%ls_pages", dir, base);
     CreateDirectoryW(outDir, NULL);
 
-    int pageW = 1240, pageH = 1754; // A4 150 DPI
-    uint32_t *pagePixels = (uint32_t*)malloc(pageW * pageH * sizeof(uint32_t));
+    InitPdfiumBridge();
+    void *pPdfDoc = NULL;
+    if (g_pdfiumAvailable && doc->data && doc->size > 0) {
+        pPdfDoc = pFPDF_LoadMemDocument(doc->data, (int)doc->size, NULL);
+    }
 
     CLSID clsidFormat = { 0x557cf401, 0x1a04, 0x11d3, { 0x9a, 0x73, 0x00, 0x00, 0xf8, 0x1e, 0xf3, 0x2e } }; // JPG default
     const WCHAR *ext = L"jpg";
@@ -1732,27 +1770,87 @@ static DWORD WINAPI WorkerConvertToImages(void *arg) {
         ext = L"png";
     }
 
-    for (int i = 0; i < doc->pageCount; i++) {
+    int totalPages = doc->pageCount;
+    if (pPdfDoc && pFPDF_GetPageCount) {
+        int c = pFPDF_GetPageCount(pPdfDoc);
+        if (c > 0) totalPages = c;
+    }
+
+    for (int i = 0; i < totalPages; i++) {
         if (p->ctx->cancelRequested) break;
 
-        int pct = (i * 100) / doc->pageCount;
+        int pct = (i * 100) / totalPages;
         p->ctx->jobProgress = pct;
         p->ctx->progressPercent = pct;
-        swprintf(p->ctx->statusText, 128, L"Rendering page %d of %d...", i + 1, doc->pageCount);
+        swprintf(p->ctx->statusText, 128, L"Rendering page %d of %d...", i + 1, totalPages);
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
 
-        if (pagePixels && Magify_PdfDoc_RenderThumbnail(doc, i, pageW, pageH, pagePixels)) {
+        int curW = 1240;
+        int curH = 1754;
+        uint32_t *pagePixels = NULL;
+        BOOL rendered = FALSE;
+
+        if (pPdfDoc) {
+            void *pPage = pFPDF_LoadPage(pPdfDoc, i);
+            if (pPage) {
+                double pw = (pFPDF_GetPageWidth ? pFPDF_GetPageWidth(pPage) : 595.0);
+                double ph = (pFPDF_GetPageHeight ? pFPDF_GetPageHeight(pPage) : 842.0);
+                if (pw > 0 && ph > 0) {
+                    if (pw > ph) {
+                        curW = 1754;
+                        curH = (int)(1754.0 * (ph / pw));
+                    } else {
+                        curW = 1240;
+                        curH = (int)(1240.0 * (ph / pw));
+                    }
+                }
+                if (curW < 100) curW = 1240;
+                if (curH < 100) curH = 1754;
+
+                pagePixels = (uint32_t*)malloc((size_t)curW * (size_t)curH * sizeof(uint32_t));
+                if (pagePixels) {
+                    void *pBmp = pFPDFBitmap_CreateEx(curW, curH, 4, pagePixels, curW * 4);
+                    if (pBmp) {
+                        pFPDFBitmap_FillRect(pBmp, 0, 0, curW, curH, 0xFFFFFFFF);
+                        int rot = 0;
+                        if (i < doc->pageCount) {
+                            rot = (doc->pages[i].currentRotation + doc->pages[i].addedRotation) % 360;
+                        }
+                        pFPDF_RenderPageBitmap(pBmp, pPage, 0, 0, curW, curH, rot / 90, 0x01);
+                        pFPDFBitmap_Destroy(pBmp);
+                        rendered = TRUE;
+                    }
+                }
+                pFPDF_ClosePage(pPage);
+            }
+        }
+
+        if (!rendered) {
+            if (!pagePixels) pagePixels = (uint32_t*)malloc((size_t)curW * (size_t)curH * sizeof(uint32_t));
+            if (pagePixels && Magify_PdfDoc_RenderThumbnail(doc, i, curW, curH, pagePixels)) {
+                rendered = TRUE;
+            }
+        }
+
+        if (rendered && pagePixels) {
             GpBitmap *pBmp = NULL;
-            if (GdipCreateBitmapFromScan0(pageW, pageH, pageW * 4, 0x26200A, (BYTE*)pagePixels, &pBmp) == Ok && pBmp) {
+            if (GdipCreateBitmapFromScan0(curW, curH, curW * 4, 0x26200A, (BYTE*)pagePixels, &pBmp) == Ok && pBmp) {
                 WCHAR imgPath[MAX_PATH];
                 swprintf(imgPath, MAX_PATH, L"%ls\\page_%03d.%ls", outDir, i + 1, ext);
                 GdipSaveImageToFile((GpImage*)pBmp, imgPath, &clsidFormat, NULL);
                 GdipDisposeImage((GpImage*)pBmp);
             }
         }
+
+        if (pagePixels) {
+            free(pagePixels);
+            pagePixels = NULL;
+        }
     }
 
-    if (pagePixels) free(pagePixels);
+    if (pPdfDoc) {
+        pFPDF_CloseDocument(pPdfDoc);
+    }
     Magify_PdfDoc_Close(doc);
 
     swprintf(p->ctx->statusText, 128, L"Exported %ls pages to %ls_pages", ext, base);

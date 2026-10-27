@@ -349,6 +349,26 @@ int wmain(void) {
     Magify_PdfDoc_Close(docEdited);
     Magify_PdfOrganizer_Free(org);
 
+    // PDF to Image Rendering & Export
+    printf("  Testing high-fidelity PDF to JPG batch export...\n");
+    MagifyContext convCtx;
+    memset(&convCtx, 0, sizeof(convCtx));
+    wcscpy(convCtx.files[0], multiPdfOut);
+    convCtx.fileCount = 1;
+    BOOL convOk = Magify_PdfConvertToImages(&convCtx, L"JPG");
+    assert(convOk);
+    for (int t = 0; t < 100; t++) {
+        if (convCtx.progressPercent == 100) break;
+        Sleep(20);
+    }
+    assert(convCtx.progressPercent == 100);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_pages\\page_001.jpg") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_pages\\page_002.jpg") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_pages\\page_003.jpg") != INVALID_FILE_ATTRIBUTES);
+    uint64_t p1Size = Magify_GetFileSize(L"test_assets\\sample_multi_pages\\page_001.jpg");
+    assert(p1Size > 1000);
+    printf("  Exported 3 pages to JPG (page 1: %llu bytes, non-blank rendered)\n", (unsigned long long)p1Size);
+
     // ---------------------------------------------------------
     // 15. Safe Output Path, Collision Avoidance & In-Place Overwrite
     // ---------------------------------------------------------

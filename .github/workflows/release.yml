@@ -47,6 +47,9 @@ jobs:
         run: |
           New-Item -ItemType Directory -Path "dist/Magify" -Force | Out-Null
           Copy-Item "build/magify.exe" -Destination "dist/Magify/magify.exe"
+          if (Test-Path "magify/build/pdfium.dll") {
+            Copy-Item "magify/build/pdfium.dll" -Destination "dist/Magify/pdfium.dll"
+          }
           Copy-Item "setup.bat" -Destination "dist/Magify/setup.bat"
           if (Test-Path "magify/assets/magify.ico") {
             New-Item -ItemType Directory -Path "dist/Magify/assets" -Force | Out-Null
@@ -67,6 +70,7 @@ jobs:
         with:
           files: |
             build/magify.exe
+            magify/build/pdfium.dll
             Magify-v1.0-Windows-x64.zip
           generate_release_notes: true
           draft: false

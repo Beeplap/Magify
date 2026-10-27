@@ -44,6 +44,9 @@ taskkill /f /im magify.exe >nul 2>nul
 echo [INFO] Deploying to !INSTALL_DIR!...
 if not exist "!INSTALL_DIR!" mkdir "!INSTALL_DIR!"
 copy /y "!SRC_EXE!" "!INSTALL_DIR!\magify.exe" >nul
+if exist "%~dp0magify\build\pdfium.dll" copy /y "%~dp0magify\build\pdfium.dll" "!INSTALL_DIR!\pdfium.dll" >nul
+if exist "%~dp0build\pdfium.dll" copy /y "%~dp0build\pdfium.dll" "!INSTALL_DIR!\pdfium.dll" >nul
+if exist "%~dp0pdfium.dll" copy /y "%~dp0pdfium.dll" "!INSTALL_DIR!\pdfium.dll" >nul
 if exist "%~dp0magify\assets\magify.ico" copy /y "%~dp0magify\assets\magify.ico" "!INSTALL_DIR!\magify.ico" >nul
 if exist "%~dp0assets\magify.ico" copy /y "%~dp0assets\magify.ico" "!INSTALL_DIR!\magify.ico" >nul
 
