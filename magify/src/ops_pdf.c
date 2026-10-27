@@ -212,7 +212,8 @@ static int FindKidsRefs(const char *dictStr, int *outIds, int maxKids) {
 // -------------------------------------------------------------
 // Recursive Page Traversal
 // -------------------------------------------------------------
-static void TraversePagesNode(MagifyPdfDoc *doc, int objId, int inheritedRot, float inheritedW, float inheritedH) {
+static void TraversePagesNode(MagifyPdfDoc *doc, int objId, int inheritedRot, float inheritedW, float inheritedH, int depth) {
+    if (depth > 32) return;
     if (objId <= 0 || objId >= MAGIFY_PDF_MAX_OBJECTS) return;
     if (!doc->objects[objId].inUse) return;
     if (doc->pageCount >= MAGIFY_PDF_MAX_PAGES) return;
@@ -234,7 +235,7 @@ static void TraversePagesNode(MagifyPdfDoc *doc, int objId, int inheritedRot, fl
 
     if (kidCount > 0 && strstr(dictStr, "/Kids")) {
         for (int i = 0; i < kidCount; i++) {
-            TraversePagesNode(doc, kids[i], rot, w, h);
+            TraversePagesNode(doc, kids[i], rot, w, h, depth + 1);
         }
     } else {
         MagifyPdfPageInfo *pi = &doc->pages[doc->pageCount];
@@ -412,7 +413,7 @@ MagifyPdfDoc *Magify_PdfDoc_Open(const WCHAR *filePath) {
     }
 
     if (doc->pagesObjId > 0) {
-        TraversePagesNode(doc, doc->pagesObjId, 0, 595.0f, 842.0f);
+        TraversePagesNode(doc, doc->pagesObjId, 0, 595.0f, 842.0f, 0);
     }
 
     // Fallback scanner if pages array is still empty
@@ -449,6 +450,11 @@ MagifyPdfDoc *Magify_PdfDoc_Open(const WCHAR *filePath) {
                 }
             }
         }
+    }
+
+    if (doc->pageCount == 0) {
+        Magify_PdfDoc_Close(doc);
+        return NULL;
     }
 
     return doc;
@@ -1533,7 +1539,7 @@ static DWORD WINAPI WorkerRotate(void *arg) {
         }
     } else {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"PDF rotation failed");
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
     }
 
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -1566,7 +1572,7 @@ static DWORD WINAPI WorkerSplit(void *arg) {
         swprintf(p->ctx->statusText, 128, L"Burst all pages into separate PDFs");
     } else {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Split failed");
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
     }
 
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -1611,7 +1617,7 @@ static DWORD WINAPI WorkerMerge(void *arg) {
         swprintf(p->ctx->statusText, 128, L"Merged %d PDFs into %ls", p->ctx->fileCount, PathFindFileNameW(outPath));
     } else {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Merge failed");
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
     }
 
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
@@ -1671,7 +1677,7 @@ static DWORD WINAPI WorkerCompress(void *arg) {
         wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
     } else {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Compression failed");
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
     }
 
@@ -1697,6 +1703,11 @@ static DWORD WINAPI WorkerConvertToImages(void *arg) {
     MagifyPdfDoc *doc = Magify_PdfDoc_Open(p->srcPath);
     if (!doc || doc->pageCount == 0) {
         if (doc) Magify_PdfDoc_Close(doc);
+        p->ctx->isErrorState = TRUE;
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -1780,7 +1791,7 @@ static DWORD WINAPI WorkerExtractText(void *arg) {
         swprintf(p->ctx->statusText, 128, L"Extracted text to %ls", PathFindFileNameW(outPath));
     } else {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Text extraction failed");
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
     }
 
     wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);

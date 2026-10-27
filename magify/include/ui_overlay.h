@@ -9,5 +9,7 @@ void Magify_CloseOverlay(MagifyContext *ctx);
 void Magify_RedrawOverlay(MagifyContext *ctx);
 int Magify_HitTestRadial(float mouseX, float mouseY, float centerX, float centerY,
                          float innerR, float outerR, int sliceCount, float rotationOffsetDeg);
+float Magify_GetDpiScaleForPoint(POINT pt);
+float Magify_GetDpiScaleForWindow(HWND hwnd);
 
 #endif // MAGIFY_UI_OVERLAY_H

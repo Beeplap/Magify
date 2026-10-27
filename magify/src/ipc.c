@@ -142,13 +142,19 @@ void Magify_IPC_StopServer(void) {
     if (g_hStopEvent) {
         SetEvent(g_hStopEvent);
     }
+    if (g_hThread) {
+        CancelSynchronousIo(g_hThread);
+    }
+    HANDLE hDummy = CreateFileW(MAGIFY_PIPE_NAME, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (hDummy != INVALID_HANDLE_VALUE) {
+        CloseHandle(hDummy);
+    }
     if (g_hPipe != INVALID_HANDLE_VALUE) {
-        // Cancel blocking operations
         CloseHandle(g_hPipe);
         g_hPipe = INVALID_HANDLE_VALUE;
     }
     if (g_hThread) {
-        WaitForSingleObject(g_hThread, 200);
+        WaitForSingleObject(g_hThread, 300);
         CloseHandle(g_hThread);
         g_hThread = NULL;
     }

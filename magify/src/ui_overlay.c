@@ -28,8 +28,8 @@ static int g_surfHeight = 0;
 static HDC g_hTextDC = NULL;
 static HBITMAP g_hTextDIB = NULL;
 static uint32_t *g_textPixels = NULL;
-static const int TEXT_SCRATCH_W = 320;
-static const int TEXT_SCRATCH_H = 80;
+static const int TEXT_SCRATCH_W = 512;
+static const int TEXT_SCRATCH_H = 128;
 
 // Smooth hover expansion tracking
 static float g_sliceHover[8] = {0};
@@ -38,6 +38,52 @@ static float g_hubHover = 0.0f;
 static BOOL s_themeCached = FALSE;
 static BOOL s_cachedIsLight = FALSE;
 static DWORD s_lastThemeQueryTick = 0;
+
+float Magify_GetDpiScaleForPoint(POINT pt) {
+    HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+    if (hShcore) {
+        typedef HRESULT (WINAPI *GetDpiForMonitorFn)(HMONITOR, int, UINT*, UINT*);
+        GetDpiForMonitorFn fn = (GetDpiForMonitorFn)(void*)GetProcAddress(hShcore, "GetDpiForMonitor");
+        if (fn) {
+            UINT dpiX = 96, dpiY = 96;
+            if (SUCCEEDED(fn(hMon, 0 /* MDT_EFFECTIVE_DPI */, &dpiX, &dpiY)) && dpiY > 0) {
+                FreeLibrary(hShcore);
+                float s = (float)dpiY / 96.0f;
+                return (s < 1.0f) ? 1.0f : s;
+            }
+        }
+        FreeLibrary(hShcore);
+    }
+    // Fallback: system display DPI
+    HDC hdc = GetDC(NULL);
+    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+    ReleaseDC(NULL, hdc);
+    float s = (float)dpi / 96.0f;
+    return (s < 1.0f) ? 1.0f : s;
+}
+
+float Magify_GetDpiScaleForWindow(HWND hwnd) {
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        typedef UINT (WINAPI *GetDpiForWindowFn)(HWND);
+        GetDpiForWindowFn fn = (GetDpiForWindowFn)(void*)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (fn) {
+            UINT dpi = fn(hwnd);
+            if (dpi > 0) {
+                float s = (float)dpi / 96.0f;
+                return (s < 1.0f) ? 1.0f : s;
+            }
+        }
+    }
+    POINT pt = {0, 0};
+    RECT rc;
+    if (GetWindowRect(hwnd, &rc)) {
+        pt.x = (rc.left + rc.right) / 2;
+        pt.y = (rc.top + rc.bottom) / 2;
+    }
+    return Magify_GetDpiScaleForPoint(pt);
+}
 
 BOOL Magify_IsSystemLightTheme(void) {
     DWORD now = GetTickCount();
@@ -904,23 +950,24 @@ static void RenderRadialMenu(MagifyContext *ctx) {
     }
 
     // Center Hub Text
+    float s = (ctx->dpiScale >= 1.0f) ? ctx->dpiScale : 1.0f;
     if (ctx->uiState == UI_STATE_PROCESSING || ctx->hubExpandAnim > 0.1f) {
         if (ctx->isErrorState) {
-            DrawCrispTextARGB(L"✕ ERROR", (int)cx, (int)cy - 8, RGB(244, 63, 94), 14, FW_BOLD, globalAlpha, FALSE);
-            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)cy + 14, RGB(203, 213, 225), 9, FW_NORMAL, globalAlpha, FALSE);
+            DrawCrispTextARGB(L"✕ ERROR", (int)cx, (int)(cy - 8.0f * s), RGB(244, 63, 94), (int)(14.0f * s), FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)(cy + 14.0f * s), RGB(203, 213, 225), (int)(9.0f * s), FW_NORMAL, globalAlpha, FALSE);
         } else if (ctx->isSuccessState) {
-            DrawCrispTextARGB(L"✓ COMPLETE", (int)cx, (int)cy - 8, RGB(16, 185, 129), 14, FW_BOLD, globalAlpha, FALSE);
-            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)cy + 14, RGB(248, 250, 252), 9, FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(L"✓ COMPLETE", (int)cx, (int)(cy - 8.0f * s), RGB(16, 185, 129), (int)(14.0f * s), FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(ctx->progressStatusText, (int)cx, (int)(cy + 14.0f * s), RGB(248, 250, 252), (int)(9.0f * s), FW_BOLD, globalAlpha, FALSE);
         } else {
             WCHAR progStr[32];
             swprintf(progStr, 32, L"%d%%", (int)ctx->progressPercent);
-            DrawCrispTextARGB(progStr, (int)cx, (int)cy - 10, th->textPrimary, 20, FW_BOLD, globalAlpha, FALSE);
+            DrawCrispTextARGB(progStr, (int)cx, (int)(cy - 10.0f * s), th->textPrimary, (int)(20.0f * s), FW_BOLD, globalAlpha, FALSE);
             const WCHAR *statusMsg = (ctx->progressStatusText[0] != L'\0') ? ctx->progressStatusText : ctx->statusText;
-            DrawCrispTextARGB(statusMsg, (int)cx, (int)cy + 14, th->textAccent, 9, FW_NORMAL, globalAlpha, FALSE);
+            DrawCrispTextARGB(statusMsg, (int)cx, (int)(cy + 14.0f * s), th->textAccent, (int)(9.0f * s), FW_NORMAL, globalAlpha, FALSE);
         }
     } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
-        DrawCrispTextARGB(L"← BACK", (int)cx, (int)cy - 6, th->textAccent, 14, FW_BOLD, globalAlpha, FALSE);
-        DrawCrispTextARGB(L"Click to return", (int)cx, (int)cy + 12, th->textSecondary, 9, FW_NORMAL, globalAlpha, FALSE);
+        DrawCrispTextARGB(L"← BACK", (int)cx, (int)(cy - 6.0f * s), th->textAccent, (int)(14.0f * s), FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(L"Click to return", (int)cx, (int)(cy + 12.0f * s), th->textSecondary, (int)(9.0f * s), FW_NORMAL, globalAlpha, FALSE);
     } else {
         WCHAR badge[32] = {0};
         if (ctx->fileCount > 1) {
@@ -932,7 +979,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         } else {
             wcscpy(badge, L"FILE");
         }
-        DrawCrispTextARGB(badge, (int)cx, (int)cy - 16, th->textAccent, 12, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(badge, (int)cx, (int)(cy - 16.0f * s), th->textAccent, (int)(12.0f * s), FW_BOLD, globalAlpha, FALSE);
 
         WCHAR nameDisplay[32] = {0};
         if (ctx->fileCount == 1 && ctx->files[0][0] != L'\0') {
@@ -943,11 +990,11 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         } else {
             wcscpy(nameDisplay, L"Magify");
         }
-        DrawCrispTextARGB(nameDisplay, (int)cx, (int)cy, th->textPrimary, 11, FW_SEMIBOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(nameDisplay, (int)cx, (int)cy, th->textPrimary, (int)(11.0f * s), FW_SEMIBOLD, globalAlpha, FALSE);
 
         WCHAR sizeStr[32] = {0};
         Magify_FormatFileSize(ctx->totalSizeBytes, sizeStr, 32);
-        DrawCrispTextARGB(sizeStr, (int)cx, (int)cy + 15, th->textSecondary, 10, FW_NORMAL, globalAlpha, FALSE);
+        DrawCrispTextARGB(sizeStr, (int)cx, (int)(cy + 15.0f * s), th->textSecondary, (int)(10.0f * s), FW_NORMAL, globalAlpha, FALSE);
     }
 
     // Slice Labels
@@ -976,11 +1023,11 @@ static void RenderRadialMenu(MagifyContext *ctx) {
         COLORREF titleColor = (hAmount > 0.5f) ? (th->isLightMode ? RGB(109, 40, 217) : RGB(255, 255, 255)) : th->textPrimary;
         COLORREF subColor = (hAmount > 0.5f) ? (th->isLightMode ? RGB(8, 145, 178) : RGB(220, 245, 255)) : th->textSecondary;
 
-        int titleFont = (sliceCount <= 4) ? 12 : 11;
-        int subFont = (sliceCount <= 4) ? 9 : 8;
+        int titleFont = (int)(((sliceCount <= 4) ? 12 : 11) * s);
+        int subFont = (int)(((sliceCount <= 4) ? 9 : 8) * s);
 
-        DrawCrispTextARGB(descs[i].title, lx, ly - 7, titleColor, titleFont, FW_BOLD, globalAlpha, FALSE);
-        DrawCrispTextARGB(descs[i].subtitle, lx, ly + 8, subColor, subFont, FW_NORMAL, globalAlpha, FALSE);
+        DrawCrispTextARGB(descs[i].title, lx, (int)(ly - 7.0f * s), titleColor, titleFont, FW_BOLD, globalAlpha, FALSE);
+        DrawCrispTextARGB(descs[i].subtitle, lx, (int)(ly + 8.0f * s), subColor, subFont, FW_NORMAL, globalAlpha, FALSE);
     }
 }
 
@@ -1753,6 +1800,31 @@ static void HandlePdfOrganizerKeyDown(MagifyContext *ctx, WPARAM wParam) {
         Magify_PdfOrganizer_Free(org);
         ctx->pdfOrganizer = NULL;
         ctx->uiState = UI_STATE_RADIAL_ROOT;
+    } else if (wParam == VK_LEFT) {
+        if (org->hoverPageIndex > 0) {
+            org->hoverPageIndex--;
+            RenderFrame(ctx);
+        }
+    } else if (wParam == VK_RIGHT) {
+        if (org->hoverPageIndex < org->totalPages - 1) {
+            org->hoverPageIndex++;
+            RenderFrame(ctx);
+        }
+    } else if (wParam == VK_DELETE || wParam == 'D' || wParam == 'd') {
+        if (org->hoverPageIndex >= 0 && org->hoverPageIndex < org->totalPages) {
+            org->pages[org->hoverPageIndex].markedDeleted = !org->pages[org->hoverPageIndex].markedDeleted;
+            RenderFrame(ctx);
+        }
+    } else if (wParam == 'R' || wParam == 'r') {
+        if (org->hoverPageIndex >= 0 && org->hoverPageIndex < org->totalPages) {
+            org->pages[org->hoverPageIndex].addedRotation = (org->pages[org->hoverPageIndex].addedRotation + 90) % 360;
+            RenderFrame(ctx);
+        }
+    } else if (wParam == 'L' || wParam == 'l') {
+        if (org->hoverPageIndex >= 0 && org->hoverPageIndex < org->totalPages) {
+            org->pages[org->hoverPageIndex].addedRotation = (org->pages[org->hoverPageIndex].addedRotation + 270) % 360;
+            RenderFrame(ctx);
+        }
     }
 }
 
@@ -1774,6 +1846,25 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             s_themeCached = FALSE;
             if (ctx) {
                 ctx->themePalette = Magify_GetActiveTheme();
+                RenderFrame(ctx);
+            }
+            return 0;
+        }
+
+        case WM_DPICHANGED: {
+            UINT newDpi = HIWORD(wParam);
+            if (ctx) {
+                ctx->dpiScale = (float)newDpi / 96.0f;
+                if (ctx->dpiScale < 1.0f) ctx->dpiScale = 1.0f;
+                RECT *prc = (RECT*)lParam;
+                int newW = prc->right - prc->left;
+                int newH = prc->bottom - prc->top;
+                ctx->overlayWidth = newW;
+                ctx->overlayHeight = newH;
+                SetWindowPos(hwnd, NULL, prc->left, prc->top, newW, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+                HDC hdcScreen = GetDC(hwnd);
+                InitDIB(hdcScreen, newW, newH);
+                ReleaseDC(hwnd, hdcScreen);
                 RenderFrame(ctx);
             }
             return 0;
@@ -2134,6 +2225,9 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 return 0;
             }
 
+            int sliceCount = (ctx->uiState == UI_STATE_RADIAL_ROOT) ? 4 : GetSubmenuSliceCount(ctx);
+            if (sliceCount < 1) sliceCount = 1;
+
             if (wParam == VK_ESCAPE) {
                 if (ctx->uiState == UI_STATE_PROCESSING) {
                     Magify_CancelWorker(ctx);
@@ -2144,11 +2238,80 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                     ctx->uiState = UI_STATE_RADIAL_ROOT;
                     ctx->activeSubmenu = SUBMENU_NONE;
                     ctx->hoveredSlice = -1;
+                    for (int i = 0; i < 8; i++) g_sliceHover[i] = 0.0f;
                     RenderFrame(ctx);
                 } else {
                     Magify_CloseOverlay(ctx);
                 }
-            } else if (wParam == 'C' || wParam == 'c') {
+                return 0;
+            }
+
+            if (wParam == VK_RIGHT || (wParam == VK_TAB && !(GetKeyState(VK_SHIFT) & 0x8000))) {
+                if (ctx->uiState == UI_STATE_RADIAL_ROOT && wParam == VK_RIGHT) {
+                    ctx->hoveredSlice = 1; // Edit (Right)
+                } else {
+                    if (ctx->hoveredSlice < 0) ctx->hoveredSlice = 0;
+                    else ctx->hoveredSlice = (ctx->hoveredSlice + 1) % sliceCount;
+                }
+                for (int i = 0; i < 8; i++) g_sliceHover[i] = (i == ctx->hoveredSlice) ? 1.0f : 0.0f;
+                RenderFrame(ctx);
+                return 0;
+            }
+
+            if (wParam == VK_LEFT || (wParam == VK_TAB && (GetKeyState(VK_SHIFT) & 0x8000))) {
+                if (ctx->uiState == UI_STATE_RADIAL_ROOT && wParam == VK_LEFT) {
+                    ctx->hoveredSlice = 3; // Rename (Left)
+                } else {
+                    if (ctx->hoveredSlice < 0) ctx->hoveredSlice = sliceCount - 1;
+                    else ctx->hoveredSlice = (ctx->hoveredSlice - 1 + sliceCount) % sliceCount;
+                }
+                for (int i = 0; i < 8; i++) g_sliceHover[i] = (i == ctx->hoveredSlice) ? 1.0f : 0.0f;
+                RenderFrame(ctx);
+                return 0;
+            }
+
+            if (wParam == VK_DOWN) {
+                if (ctx->uiState == UI_STATE_RADIAL_ROOT) {
+                    ctx->hoveredSlice = 2; // Compress (Bottom)
+                } else {
+                    if (ctx->hoveredSlice < 0) ctx->hoveredSlice = 0;
+                    else ctx->hoveredSlice = (ctx->hoveredSlice + 1) % sliceCount;
+                }
+                for (int i = 0; i < 8; i++) g_sliceHover[i] = (i == ctx->hoveredSlice) ? 1.0f : 0.0f;
+                RenderFrame(ctx);
+                return 0;
+            }
+
+            if (wParam == VK_UP) {
+                if (ctx->uiState == UI_STATE_RADIAL_ROOT) {
+                    ctx->hoveredSlice = 0; // Convert (Top)
+                } else {
+                    if (ctx->hoveredSlice < 0) ctx->hoveredSlice = sliceCount - 1;
+                    else ctx->hoveredSlice = (ctx->hoveredSlice - 1 + sliceCount) % sliceCount;
+                }
+                for (int i = 0; i < 8; i++) g_sliceHover[i] = (i == ctx->hoveredSlice) ? 1.0f : 0.0f;
+                RenderFrame(ctx);
+                return 0;
+            }
+
+            if (wParam == VK_RETURN || wParam == VK_SPACE) {
+                int targetSlice = (ctx->hoveredSlice >= 0 && ctx->hoveredSlice < sliceCount) ? ctx->hoveredSlice : 0;
+                ExecuteAction(ctx, targetSlice);
+                return 0;
+            }
+
+            if (wParam == VK_BACK) {
+                if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+                    ctx->uiState = UI_STATE_RADIAL_ROOT;
+                    ctx->activeSubmenu = SUBMENU_NONE;
+                    ctx->hoveredSlice = -1;
+                    for (int i = 0; i < 8; i++) g_sliceHover[i] = 0.0f;
+                    RenderFrame(ctx);
+                    return 0;
+                }
+            }
+
+            if (wParam == 'C' || wParam == 'c') {
                 ExecuteAction(ctx, 0); // Convert
             } else if (wParam == 'E' || wParam == 'e') {
                 ExecuteAction(ctx, 1); // Edit
@@ -2178,6 +2341,14 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 free(ctx->cropPreviewPixels);
                 ctx->cropPreviewPixels = NULL;
             }
+            if (g_hDIB) { DeleteObject(g_hDIB); g_hDIB = NULL; }
+            if (g_hMemDC) { DeleteDC(g_hMemDC); g_hMemDC = NULL; }
+            if (g_hTextDIB) { DeleteObject(g_hTextDIB); g_hTextDIB = NULL; }
+            if (g_hTextDC) { DeleteDC(g_hTextDC); g_hTextDC = NULL; }
+            g_pixels = NULL;
+            g_textPixels = NULL;
+            g_surfWidth = 0;
+            g_surfHeight = 0;
             Magify_Image_Shutdown();
             PostQuitMessage(0);
             return 0;
@@ -2224,6 +2395,13 @@ HWND Magify_CreateOverlayWindow(HINSTANCE hInst, int width, int height, POINT cu
 
 void Magify_ShowOverlay(MagifyContext *ctx) {
     g_overlayCtx = ctx;
+
+    float dpiScale = Magify_GetDpiScaleForPoint(ctx->spawnCursor);
+    ctx->dpiScale = dpiScale;
+    if (ctx->uiState == UI_STATE_RADIAL_ROOT || ctx->uiState == UI_STATE_RADIAL_SUB) {
+        ctx->overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * ctx->dpiScale);
+        ctx->overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * ctx->dpiScale);
+    }
 
     ctx->themePalette = Magify_GetActiveTheme();
     Magify_Image_Init();

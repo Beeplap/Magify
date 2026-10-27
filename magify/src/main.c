@@ -92,13 +92,7 @@ static void LaunchTestOverlay(MagifyFileClass fileClass) {
 
     ctx->hInstance = g_hInstance;
     GetCursorPos(&ctx->spawnCursor);
-
-    HDC hdc = GetDC(NULL);
-    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(NULL, hdc);
-    ctx->dpiScale = (float)dpi / 96.0f;
-    if (ctx->dpiScale < 1.0f) ctx->dpiScale = 1.0f;
-
+    ctx->dpiScale = Magify_GetDpiScaleForPoint(ctx->spawnCursor);
     ctx->overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * ctx->dpiScale);
     ctx->overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * ctx->dpiScale);
 
@@ -274,6 +268,11 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         }
 
         case WM_DESTROY: {
+            if (g_hBrushBg) { DeleteObject(g_hBrushBg); g_hBrushBg = NULL; }
+            if (g_hBrushCard) { DeleteObject(g_hBrushCard); g_hBrushCard = NULL; }
+            if (g_hFontTitle) { DeleteObject(g_hFontTitle); g_hFontTitle = NULL; }
+            if (g_hFontNormal) { DeleteObject(g_hFontNormal); g_hFontNormal = NULL; }
+            if (g_hFontSmall) { DeleteObject(g_hFontSmall); g_hFontSmall = NULL; }
             PostQuitMessage(0);
             return 0;
         }
@@ -389,13 +388,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     memset(&ctx, 0, sizeof(ctx));
     ctx.hInstance = hInstance;
     GetCursorPos(&ctx.spawnCursor);
-
-    HDC hdc = GetDC(NULL);
-    int dpi = GetDeviceCaps(hdc, LOGPIXELSY);
-    ReleaseDC(NULL, hdc);
-    ctx.dpiScale = (float)dpi / 96.0f;
-    if (ctx.dpiScale < 1.0f) ctx.dpiScale = 1.0f;
-
+    ctx.dpiScale = Magify_GetDpiScaleForPoint(ctx.spawnCursor);
     ctx.overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * ctx.dpiScale);
     ctx.overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * ctx.dpiScale);
 

@@ -42,7 +42,7 @@ HRESULT Magify_WIC_DecodeToPixels(const WCHAR *filePath, uint32_t **outPixels, i
     *outW = 0;
     *outH = 0;
 
-    CoInitialize(NULL);
+    HRESULT hrInit = CoInitialize(NULL);
 
     IWICImagingFactory *pFactory = NULL;
     IWICBitmapDecoder *pDecoder = NULL;
@@ -102,12 +102,20 @@ cleanup:
     SafeRelease(pFrame);
     SafeRelease(pDecoder);
     SafeRelease(pFactory);
+    if (SUCCEEDED(hrInit)) CoUninitialize();
     return hr;
 }
 
 GpBitmap *Magify_Image_LoadBitmap(const WCHAR *filePath, void **outPixelBuffer) {
     if (outPixelBuffer) *outPixelBuffer = NULL;
     if (!filePath || filePath[0] == L'\0') return NULL;
+
+    DWORD attr = GetFileAttributesW(filePath);
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExW(filePath, GetFileExInfoStandard, &fad)) {
+        if (fad.nFileSizeHigh == 0 && fad.nFileSizeLow == 0) return NULL; // empty file
+    }
 
     Magify_Image_Init();
 
@@ -208,7 +216,7 @@ BOOL Magify_LoadImageDimensions(const WCHAR *srcPath, int *outW, int *outH) {
     }
 
     // WIC dimension query fallback
-    CoInitialize(NULL);
+    HRESULT hrInit = CoInitialize(NULL);
     IWICImagingFactory *pFactory = NULL;
     IWICBitmapDecoder *pDecoder = NULL;
     IWICBitmapFrameDecode *pFrame = NULL;
@@ -232,6 +240,7 @@ BOOL Magify_LoadImageDimensions(const WCHAR *srcPath, int *outW, int *outH) {
     SafeRelease(pFrame);
     SafeRelease(pDecoder);
     SafeRelease(pFactory);
+    if (SUCCEEDED(hrInit)) CoUninitialize();
     return success;
 }
 
@@ -245,7 +254,11 @@ static DWORD WINAPI ConvertWorker(void *arg) {
     void *srcPixels = NULL;
     GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!bmp) {
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->isErrorState = TRUE;
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
+        wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
     }
@@ -316,6 +329,7 @@ static DWORD WINAPI ConvertWorker(void *arg) {
         // Standard Windows icon resolutions: 256, 48, 32, 16
         const int icoSizes[] = { 256, 48, 32, 16 };
         const int icoCount = 4;
+        IStream *icoStreams[4] = {0};
         HGLOBAL streamsGlob[4] = {0};
         DWORD streamSizes[4] = {0};
 
@@ -338,8 +352,8 @@ static DWORD WINAPI ConvertWorker(void *arg) {
             strm->lpVtbl->Stat(strm, &stg, STATFLAG_NONAME);
             streamSizes[i] = (DWORD)stg.cbSize.QuadPart;
             streamsGlob[i] = hg;
+            icoStreams[i] = strm;
 
-            strm->lpVtbl->Release(strm);
             GdipDeleteGraphics(g);
             GdipDisposeImage(scaled);
         }
@@ -384,11 +398,21 @@ static DWORD WINAPI ConvertWorker(void *arg) {
                     WriteFile(hIco, data, streamSizes[i], &bw, NULL);
                     GlobalUnlock(streamsGlob[i]);
                 }
+                if (icoStreams[i]) {
+                    icoStreams[i]->lpVtbl->Release(icoStreams[i]);
+                    icoStreams[i] = NULL;
+                }
             }
             CloseHandle(hIco);
             Magify_FinalizeOutputFile(p->srcPath, tmpPath, outPath, p->overwrite, p->ctx);
             swprintf(p->ctx->statusText, 128, L"Created ICO: %ls", PathFindFileNameW(p->overwrite ? p->srcPath : outPath));
         } else {
+            for (int i = 0; i < icoCount; i++) {
+                if (icoStreams[i]) {
+                    icoStreams[i]->lpVtbl->Release(icoStreams[i]);
+                    icoStreams[i] = NULL;
+                }
+            }
             p->ctx->isErrorState = TRUE;
             swprintf(p->ctx->statusText, 128, L"Failed to create ICO");
         }
@@ -447,7 +471,9 @@ static DWORD WINAPI RotateWorker(void *arg) {
     GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!bmp) {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
@@ -515,7 +541,9 @@ static DWORD WINAPI FlipWorker(void *arg) {
     GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!bmp) {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
@@ -578,7 +606,9 @@ static DWORD WINAPI ResizeWorker(void *arg) {
     GpBitmap *src = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!src) {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
@@ -666,7 +696,11 @@ BOOL Magify_CompressImageToTargetBytes(const WCHAR *srcPath, size_t maxBytes, Ma
     void *srcPixels = NULL;
     GpBitmap *src = Magify_Image_LoadBitmap(srcPath, &srcPixels);
     if (!src) {
-        swprintf(ctx->statusText, 128, L"Failed to open image");
+        ctx->isErrorState = TRUE;
+        ctx->progressPercent = 100;
+        ctx->jobProgress = 100;
+        swprintf(ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
+        wcsncpy(ctx->progressStatusText, ctx->statusText, 127);
         return FALSE;
     }
 
@@ -796,7 +830,9 @@ static DWORD WINAPI CompressWorker(void *arg) {
     GpBitmap *bmp = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!bmp) {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
@@ -858,7 +894,9 @@ static DWORD WINAPI CropWorker(void *arg) {
     GpBitmap *src = Magify_Image_LoadBitmap(p->srcPath, &srcPixels);
     if (!src) {
         p->ctx->isErrorState = TRUE;
-        swprintf(p->ctx->statusText, 128, L"Failed to load image");
+        p->ctx->progressPercent = 100;
+        p->ctx->jobProgress = 100;
+        swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");
         wcsncpy(p->ctx->progressStatusText, p->ctx->statusText, 127);
         free(p);
         return 0;
