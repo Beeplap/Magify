@@ -41,3 +41,5 @@ magify/test_assets/renamed_*
 *.tmp
 *.bak
 *.swp
+*.zip
+dist/

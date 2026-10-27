@@ -65,7 +65,9 @@ jobs:
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: Magify-v1.0-Windows-x64.zip
+          files: |
+            build/magify.exe
+            Magify-v1.0-Windows-x64.zip
           generate_release_notes: true
           draft: false
           prerelease: false

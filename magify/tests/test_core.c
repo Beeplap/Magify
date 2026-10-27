@@ -618,7 +618,14 @@ int wmain(void) {
 
     if (!exeExists) {
         printf("  Magify not pre-installed on this runner. Executing setup.bat to test installation...\n");
-        system("cmd.exe /c setup.bat >nul 2>nul");
+        WCHAR deskDir[MAX_PATH];
+        ExpandEnvironmentStringsW(L"%USERPROFILE%\\Desktop", deskDir, MAX_PATH);
+        CreateDirectoryW(deskDir, NULL);
+        if (GetFileAttributesW(L"setup.bat") != INVALID_FILE_ATTRIBUTES) {
+            system("cmd.exe /c setup.bat >nul 2>nul");
+        } else if (GetFileAttributesW(L"..\\setup.bat") != INVALID_FILE_ATTRIBUTES) {
+            system("cmd.exe /c ..\\setup.bat >nul 2>nul");
+        }
         attr = GetFileAttributesW(localApp);
         exeExists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
     }

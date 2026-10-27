@@ -53,7 +53,9 @@ echo [INFO] Registering Windows 11 Modern Context Menu...
 echo [INFO] Creating Desktop and Start Menu shortcuts...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ws = New-Object -ComObject WScript.Shell; " ^
-    "$dPath = [Environment]::GetFolderPath('Desktop') + '\Magify.lnk'; " ^
+    "$dDir = [Environment]::GetFolderPath('Desktop'); " ^
+    "if (-not (Test-Path $dDir)) { New-Item -ItemType Directory -Path $dDir -Force | Out-Null }; " ^
+    "$dPath = $dDir + '\Magify.lnk'; " ^
     "$s1 = $ws.CreateShortcut($dPath); " ^
     "$s1.TargetPath = '!INSTALL_DIR!\magify.exe'; " ^
     "$s1.WorkingDirectory = '!INSTALL_DIR!'; " ^
