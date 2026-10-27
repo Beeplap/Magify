@@ -1877,6 +1877,26 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
         case WM_TIMER: {
             if (wParam == TIMER_ANIM_ID) {
+                // Immediate global ESC key check: instant dismissal even across windows!
+                if (!ctx->isClosing && (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
+                    if (ctx->uiState == UI_STATE_IMAGE_EDIT || ctx->uiState == UI_STATE_PDF_EDIT || ctx->uiState == UI_STATE_RENAME_HUD) {
+                        ctx->uiState = UI_STATE_RADIAL_ROOT;
+                        ResizeOverlayWindow(ctx, MAGIFY_RADIAL_WIDTH, MAGIFY_RADIAL_HEIGHT);
+                        RenderFrame(ctx);
+                        return 0;
+                    } else if (ctx->uiState == UI_STATE_RADIAL_SUB) {
+                        ctx->uiState = UI_STATE_RADIAL_ROOT;
+                        ctx->activeSubmenu = SUBMENU_NONE;
+                        ctx->hoveredSlice = -1;
+                        for (int i = 0; i < 8; i++) g_sliceHover[i] = 0.0f;
+                        RenderFrame(ctx);
+                        return 0;
+                    } else {
+                        Magify_CloseOverlay(ctx);
+                        return 0;
+                    }
+                }
+
                 if (!ctx->isClosing) {
                     if (ctx->animProgress < 1.0f) {
                         ctx->animProgress += 0.08f;
@@ -2350,6 +2370,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             g_surfWidth = 0;
             g_surfHeight = 0;
             Magify_Image_Shutdown();
+            if (ctx && ctx->isBackgroundMode) {
+                ctx->hwndOverlay = NULL;
+                return 0;
+            }
             PostQuitMessage(0);
             return 0;
         }
@@ -2426,8 +2450,18 @@ void Magify_ShowOverlay(MagifyContext *ctx) {
 
     ShowWindow(ctx->hwndOverlay, SW_SHOW);
     UpdateWindow(ctx->hwndOverlay);
-    SetForegroundWindow(ctx->hwndOverlay);
-    SetFocus(ctx->hwndOverlay);
+
+    DWORD foreThread = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+    DWORD curThread = GetCurrentThreadId();
+    if (foreThread && foreThread != curThread) {
+        AttachThreadInput(curThread, foreThread, TRUE);
+        SetForegroundWindow(ctx->hwndOverlay);
+        SetFocus(ctx->hwndOverlay);
+        AttachThreadInput(curThread, foreThread, FALSE);
+    } else {
+        SetForegroundWindow(ctx->hwndOverlay);
+        SetFocus(ctx->hwndOverlay);
+    }
 
     RenderFrame(ctx);
 }

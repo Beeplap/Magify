@@ -544,13 +544,13 @@ static LRESULT CALLBACK DashboardWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             RECT statTitleRc = { 76, 94, 480, 118 };
             SelectObject(memDC, g_hFontNormal);
             SetTextColor(memDC, statusAccent);
-            DrawTextW(memDC, isReg ? L"Explorer Context Menu: ACTIVE" : L"Explorer Context Menu: NOT INSTALLED",
+            DrawTextW(memDC, isReg ? L"Explorer Context Menu: ACTIVE (Background Daemon Active)" : L"Explorer Context Menu: NOT INSTALLED",
                       -1, &statTitleRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
             RECT statDescRc = { 76, 118, 480, 158 };
             SelectObject(memDC, g_hFontSmall);
             SetTextColor(memDC, isLight ? RGB(100, 116, 139) : RGB(148, 163, 184));
-            DrawTextW(memDC, isReg ? L"Right-click any Image, PDF, or Folder in Windows File Explorer.\n'Modify with Magify' opens the 120fps instant radial overlay."
+            DrawTextW(memDC, isReg ? L"Auto-starts on boot. Right-click any Image or PDF anytime in Explorer!\nYou don't need to keep this window open — it works automatically."
                                    : L"Click 'Install Right-Click Menu' below to enable the context menu\nfor instant file conversions, batch resizing, and PDF editing.",
                       -1, &statDescRc, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_NOPREFIX);
 
@@ -682,6 +682,55 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             LocalFree(argv);
             return ok ? 0 : 1;
         }
+    }
+
+    // Check Background Daemon Flag
+    BOOL isBackground = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], L"--background") == 0 || _wcsicmp(argv[i], L"-b") == 0 ||
+            _wcsicmp(argv[i], L"--daemon") == 0 || _wcsicmp(argv[i], L"-d") == 0) {
+            isBackground = TRUE;
+            break;
+        }
+    }
+
+    if (isBackground) {
+        if (Magify_IPC_IsServerRunning()) {
+            LocalFree(argv);
+            return 0; // Already running in background
+        }
+        LocalFree(argv);
+
+        MagifyContext bgCtx;
+        memset(&bgCtx, 0, sizeof(bgCtx));
+        bgCtx.hInstance = hInstance;
+        bgCtx.isBackgroundMode = TRUE;
+
+        Magify_IPC_StartServer(&bgCtx);
+
+        MSG msg;
+        while (GetMessageW(&msg, NULL, 0, 0)) {
+            if (msg.message == WM_USER + 105) {
+                GetCursorPos(&bgCtx.spawnCursor);
+                bgCtx.dpiScale = Magify_GetDpiScaleForPoint(bgCtx.spawnCursor);
+                bgCtx.overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * bgCtx.dpiScale);
+                bgCtx.overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * bgCtx.dpiScale);
+                bgCtx.uiState = UI_STATE_RADIAL_ROOT;
+                bgCtx.activeSubmenu = SUBMENU_NONE;
+                bgCtx.hoveredSlice = -1;
+                bgCtx.jobProgress = 0;
+                bgCtx.progressPercent = 0;
+                bgCtx.isErrorState = FALSE;
+                bgCtx.statusText[0] = L'\0';
+                Magify_ShowOverlay(&bgCtx);
+                continue;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        Magify_IPC_StopServer();
+        return 0;
     }
 
     // Double-clicked or launched with zero file args -> open Dashboard

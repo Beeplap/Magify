@@ -26,24 +26,42 @@ typedef void*  (*FPDFBitmap_CreateEx_fn)(int width, int height, int format, void
 typedef void   (*FPDFBitmap_Destroy_fn)(void* bitmap);
 typedef void   (*FPDFBitmap_FillRect_fn)(void* bitmap, int left, int top, int width, int height, unsigned long color);
 typedef void   (*FPDF_RenderPageBitmap_fn)(void* bitmap, void* page, int start_x, int start_y, int size_x, int size_y, int rotate, int flags);
+typedef void*  (*FPDF_CreateNewDocument_fn)(void);
+typedef int    (*FPDF_ImportPages_fn)(void* dest_doc, void* src_doc, const char* page_range, int index);
+typedef struct {
+    int version;
+    int (*WriteBlock)(void* pThis, const void* pData, unsigned long size);
+    HANDLE hFile;
+} MagifyPdfiumFileWrite;
+typedef int    (*FPDF_SaveAsCopy_fn)(void* doc, void* pFileWrite, unsigned long flags);
 
 static HMODULE g_hPdfium = NULL;
 static BOOL    g_pdfiumAttempted = FALSE;
 static BOOL    g_pdfiumAvailable = FALSE;
 
-static FPDF_InitLibrary_fn      pFPDF_InitLibrary = NULL;
-static FPDF_DestroyLibrary_fn   pFPDF_DestroyLibrary = NULL;
-static FPDF_LoadMemDocument_fn  pFPDF_LoadMemDocument = NULL;
-static FPDF_CloseDocument_fn    pFPDF_CloseDocument = NULL;
-static FPDF_GetPageCount_fn     pFPDF_GetPageCount = NULL;
-static FPDF_LoadPage_fn         pFPDF_LoadPage = NULL;
-static FPDF_ClosePage_fn        pFPDF_ClosePage = NULL;
-static FPDF_GetPageWidth_fn     pFPDF_GetPageWidth = NULL;
-static FPDF_GetPageHeight_fn    pFPDF_GetPageHeight = NULL;
-static FPDFBitmap_CreateEx_fn   pFPDFBitmap_CreateEx = NULL;
-static FPDFBitmap_Destroy_fn    pFPDFBitmap_Destroy = NULL;
-static FPDFBitmap_FillRect_fn   pFPDFBitmap_FillRect = NULL;
-static FPDF_RenderPageBitmap_fn pFPDF_RenderPageBitmap = NULL;
+static FPDF_InitLibrary_fn       pFPDF_InitLibrary = NULL;
+static FPDF_DestroyLibrary_fn    pFPDF_DestroyLibrary = NULL;
+static FPDF_LoadMemDocument_fn   pFPDF_LoadMemDocument = NULL;
+static FPDF_CloseDocument_fn     pFPDF_CloseDocument = NULL;
+static FPDF_GetPageCount_fn      pFPDF_GetPageCount = NULL;
+static FPDF_LoadPage_fn          pFPDF_LoadPage = NULL;
+static FPDF_ClosePage_fn         pFPDF_ClosePage = NULL;
+static FPDF_GetPageWidth_fn      pFPDF_GetPageWidth = NULL;
+static FPDF_GetPageHeight_fn     pFPDF_GetPageHeight = NULL;
+static FPDFBitmap_CreateEx_fn    pFPDFBitmap_CreateEx = NULL;
+static FPDFBitmap_Destroy_fn     pFPDFBitmap_Destroy = NULL;
+static FPDFBitmap_FillRect_fn    pFPDFBitmap_FillRect = NULL;
+static FPDF_RenderPageBitmap_fn  pFPDF_RenderPageBitmap = NULL;
+static FPDF_CreateNewDocument_fn pFPDF_CreateNewDocument = NULL;
+static FPDF_ImportPages_fn       pFPDF_ImportPages = NULL;
+static FPDF_SaveAsCopy_fn        pFPDF_SaveAsCopy = NULL;
+
+static int MagifyPdfiumWriteBlock(void* pThis, const void* pData, unsigned long size) {
+    MagifyPdfiumFileWrite* fw = (MagifyPdfiumFileWrite*)pThis;
+    if (!fw || fw->hFile == INVALID_HANDLE_VALUE || !pData || size == 0) return 1;
+    DWORD bw = 0;
+    return WriteFile(fw->hFile, pData, size, &bw, NULL) ? 1 : 0;
+}
 
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -91,6 +109,9 @@ static void InitPdfiumBridge(void) {
     pFPDFBitmap_Destroy     = (FPDFBitmap_Destroy_fn)GetProcAddress(g_hPdfium, "FPDFBitmap_Destroy");
     pFPDFBitmap_FillRect    = (FPDFBitmap_FillRect_fn)GetProcAddress(g_hPdfium, "FPDFBitmap_FillRect");
     pFPDF_RenderPageBitmap  = (FPDF_RenderPageBitmap_fn)GetProcAddress(g_hPdfium, "FPDF_RenderPageBitmap");
+    pFPDF_CreateNewDocument = (FPDF_CreateNewDocument_fn)GetProcAddress(g_hPdfium, "FPDF_CreateNewDocument");
+    pFPDF_ImportPages       = (FPDF_ImportPages_fn)GetProcAddress(g_hPdfium, "FPDF_ImportPages");
+    pFPDF_SaveAsCopy        = (FPDF_SaveAsCopy_fn)GetProcAddress(g_hPdfium, "FPDF_SaveAsCopy");
 
     if (pFPDF_InitLibrary && pFPDF_LoadMemDocument && pFPDF_RenderPageBitmap) {
         pFPDF_InitLibrary();
@@ -611,22 +632,90 @@ BOOL Magify_PdfSplitSync(const WCHAR *srcPath, const WCHAR *rangeSpec, const WCH
 
     BOOL isBurst = (!rangeSpec || wcscmp(rangeSpec, L"BURST") == 0);
 
+    WCHAR dir[MAX_PATH], stem[MAX_PATH];
+    wcsncpy(dir, srcPath, MAX_PATH - 1);
+    PathRemoveFileSpecW(dir);
+    wcsncpy(stem, PathFindFileNameW(srcPath), MAX_PATH - 1);
+    PathRemoveExtensionW(stem);
+
+    WCHAR baseDir[MAX_PATH];
+    if (outDirOrPath && outDirOrPath[0]) {
+        wcsncpy(baseDir, outDirOrPath, MAX_PATH - 1);
+    } else {
+        swprintf(baseDir, MAX_PATH, L"%ls\\%ls_split", dir, stem);
+    }
     if (isBurst) {
-        WCHAR baseDir[MAX_PATH];
-        if (outDirOrPath && outDirOrPath[0]) {
-            wcsncpy(baseDir, outDirOrPath, MAX_PATH - 1);
-        } else {
-            wcsncpy(baseDir, srcPath, MAX_PATH - 1);
-            PathRemoveFileSpecW(baseDir);
+        CreateDirectoryW(baseDir, NULL);
+    }
+
+    InitPdfiumBridge();
+    if (g_pdfiumAvailable && pFPDF_CreateNewDocument && pFPDF_ImportPages && pFPDF_SaveAsCopy && doc->data && doc->size > 0) {
+        void *srcDoc = pFPDF_LoadMemDocument(doc->data, (int)doc->size, NULL);
+        if (srcDoc) {
+            if (isBurst) {
+                for (int p = 0; p < doc->pageCount; p++) {
+                    void *destDoc = pFPDF_CreateNewDocument();
+                    if (destDoc) {
+                        char range[16];
+                        snprintf(range, sizeof(range), "%d", p + 1);
+                        pFPDF_ImportPages(destDoc, srcDoc, range, 0);
+
+                        WCHAR pagePath[MAX_PATH];
+                        swprintf(pagePath, MAX_PATH, L"%ls\\page_%03d.pdf", baseDir, p + 1);
+
+                        HANDLE hOut = CreateFileW(pagePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                        if (hOut != INVALID_HANDLE_VALUE) {
+                            MagifyPdfiumFileWrite fw;
+                            fw.version = 1;
+                            fw.WriteBlock = MagifyPdfiumWriteBlock;
+                            fw.hFile = hOut;
+                            pFPDF_SaveAsCopy(destDoc, &fw, 0);
+                            CloseHandle(hOut);
+                        }
+                        pFPDF_CloseDocument(destDoc);
+                    }
+                }
+                pFPDF_CloseDocument(srcDoc);
+                Magify_PdfDoc_Close(doc);
+                return TRUE;
+            } else {
+                // Custom range export (e.g. "1-2" or "1, 3") to single output PDF
+                void *destDoc = pFPDF_CreateNewDocument();
+                if (destDoc) {
+                    char rangeA[128];
+                    WideCharToMultiByte(CP_UTF8, 0, rangeSpec, -1, rangeA, sizeof(rangeA), NULL, NULL);
+                    pFPDF_ImportPages(destDoc, srcDoc, rangeA, 0);
+
+                    WCHAR outPath[MAX_PATH];
+                    if (outDirOrPath && outDirOrPath[0]) {
+                        wcsncpy(outPath, outDirOrPath, MAX_PATH - 1);
+                    } else {
+                        swprintf(outPath, MAX_PATH, L"%ls\\%ls_split_%ls.pdf", dir, stem, rangeSpec);
+                    }
+
+                    HANDLE hOut = CreateFileW(outPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+                    if (hOut != INVALID_HANDLE_VALUE) {
+                        MagifyPdfiumFileWrite fw;
+                        fw.version = 1;
+                        fw.WriteBlock = MagifyPdfiumWriteBlock;
+                        fw.hFile = hOut;
+                        pFPDF_SaveAsCopy(destDoc, &fw, 0);
+                        CloseHandle(hOut);
+                    }
+                    pFPDF_CloseDocument(destDoc);
+                    pFPDF_CloseDocument(srcDoc);
+                    Magify_PdfDoc_Close(doc);
+                    return TRUE;
+                }
+            }
+            pFPDF_CloseDocument(srcDoc);
         }
+    }
 
-        WCHAR stem[MAX_PATH];
-        wcsncpy(stem, PathFindFileNameW(srcPath), MAX_PATH - 1);
-        PathRemoveExtensionW(stem);
-
+    if (isBurst) {
         for (int p = 0; p < doc->pageCount; p++) {
             WCHAR pagePath[MAX_PATH];
-            swprintf(pagePath, MAX_PATH, L"%ls\\%ls_page_%03d.pdf", baseDir, stem, p + 1);
+            swprintf(pagePath, MAX_PATH, L"%ls\\page_%03d.pdf", baseDir, p + 1);
 
             ByteBuffer outBuf;
             BufInit(&outBuf, 16384);
@@ -674,18 +763,17 @@ BOOL Magify_PdfSplitSync(const WCHAR *srcPath, const WCHAR *rangeSpec, const WCH
                 free(pDict);
             }
 
-            // Copy all referenced resource/content objects from original doc offset
+            // Copy all referenced resource/content objects from original doc offset keeping original IDs
             int maxId = 3;
             for (int id = 1; id < doc->objectCount; id++) {
-                if (id == pageObjId || id == doc->rootObjId || id == doc->pagesObjId) continue;
+                if (id == pageObjId || id == doc->rootObjId || id == doc->pagesObjId || id == 1 || id == 2 || id == 3) continue;
                 if (!doc->objects[id].inUse) continue;
-                int mappedId = id + 10;
-                if (mappedId >= MAGIFY_PDF_MAX_OBJECTS) continue;
-                offsets[mappedId] = outBuf.size;
-                BufAppendFmt(&outBuf, "%d 0 obj\n", mappedId);
+                if (id >= MAGIFY_PDF_MAX_OBJECTS) continue;
+                offsets[id] = outBuf.size;
+                BufAppendFmt(&outBuf, "%d 0 obj\n", id);
                 BufAppend(&outBuf, doc->data + doc->objects[id].offset, doc->objects[id].length);
                 BufAppendStr(&outBuf, "\nendobj\n");
-                if (mappedId > maxId) maxId = mappedId;
+                if (id > maxId) maxId = id;
             }
 
             WritePdfFooter(&outBuf, offsets, maxId, 1);
@@ -1602,9 +1690,13 @@ static DWORD WINAPI WorkerSplit(void *arg) {
     swprintf(p->ctx->progressStatusText, 128, L"Splitting PDF document...");
     wcsncpy(p->ctx->statusText, p->ctx->progressStatusText, 127);
 
+    WCHAR stem[MAX_PATH];
+    wcsncpy(stem, PathFindFileNameW(p->srcPath), MAX_PATH - 1);
+    PathRemoveExtensionW(stem);
+
     BOOL ok = Magify_PdfSplitSync(p->srcPath, p->paramStr, NULL);
     if (ok) {
-        swprintf(p->ctx->statusText, 128, L"Burst all pages into separate PDFs");
+        swprintf(p->ctx->statusText, 128, L"Exported split pages to %ls_split", stem);
     } else {
         p->ctx->isErrorState = TRUE;
         swprintf(p->ctx->statusText, 128, L"Error: Unsupported or corrupted file format");

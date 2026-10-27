@@ -77,6 +77,7 @@ typedef struct {
     int             fileCount;
     MagifyFileClass primaryClass;
     uint64_t        totalSizeBytes;
+    BOOL            isBackgroundMode;
 
     MagifyUIState   uiState;
     MagifySubmenuType activeSubmenu;

@@ -146,6 +146,16 @@ BOOL Magify_RegisterContextMenu(void) {
         }
     }
 
+    // E. Register auto-start in HKCU Run so Magify runs automatically on computer boot
+    HKEY hRun = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hRun) == ERROR_SUCCESS) {
+        WCHAR runCmd[MAX_PATH + 32];
+        swprintf(runCmd, MAX_PATH + 32, L"\"%ls\" --background", exePath);
+        SetRegString(hRun, L"Magify", runCmd);
+        RegCloseKey(hRun);
+    }
+
     // Notify File Explorer to flush cache and display the new menu immediately
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
 
@@ -170,6 +180,14 @@ BOOL Magify_UnregisterContextMenu(void) {
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\Directory\\Background\\shell\\Magify");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\SystemFileAssociations\\image\\shell\\Magify");
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Software\\Classes\\SystemFileAssociations\\.pdf\\shell\\Magify");
+
+    // Unregister auto-start from HKCU Run
+    HKEY hRun = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+                      0, KEY_SET_VALUE, &hRun) == ERROR_SUCCESS) {
+        RegDeleteValueW(hRun, L"Magify");
+        RegCloseKey(hRun);
+    }
 
     // Notify File Explorer
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);

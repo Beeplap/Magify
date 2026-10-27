@@ -281,10 +281,11 @@ int wmain(void) {
     // Burst all pages
     BOOL burstOk = Magify_PdfSplitSync(multiPdfOut, L"BURST", NULL);
     assert(burstOk);
-    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_001.pdf") != INVALID_FILE_ATTRIBUTES);
-    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_002.pdf") != INVALID_FILE_ATTRIBUTES);
-    assert(GetFileAttributesW(L"test_assets\\sample_multi_page_003.pdf") != INVALID_FILE_ATTRIBUTES);
-    printf("  Burst operation verified: page_001.pdf, page_002.pdf, page_003.pdf exist.\n");
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_split\\page_001.pdf") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_split\\page_002.pdf") != INVALID_FILE_ATTRIBUTES);
+    assert(GetFileAttributesW(L"test_assets\\sample_multi_split\\page_003.pdf") != INVALID_FILE_ATTRIBUTES);
+    assert(Magify_GetFileSize(L"test_assets\\sample_multi_split\\page_001.pdf") > 500);
+    printf("  Burst operation verified: dedicated subfolder sample_multi_split\\page_001..003.pdf created.\n");
 
     // ---------------------------------------------------------
     // 13. PDF Stream Compression

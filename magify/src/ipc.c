@@ -6,6 +6,11 @@ static HANDLE g_hStopEvent = NULL;
 static HANDLE g_hPipe = INVALID_HANDLE_VALUE;
 static HANDLE g_hThread = NULL;
 static MagifyContext *g_ipcCtx = NULL;
+static DWORD g_mainThreadId = 0;
+
+BOOL Magify_IPC_IsServerRunning(void) {
+    return WaitNamedPipeW(MAGIFY_PIPE_NAME, 30);
+}
 
 BOOL Magify_IPC_SendFileList(const WCHAR **paths, int count) {
     if (!paths || count <= 0) return FALSE;
@@ -78,6 +83,13 @@ static unsigned __stdcall IPC_ServerWorker(void *arg) {
 
         if (connected && g_ipcCtx) {
             DWORD bytesRead;
+            int newFilesCount = 0;
+            BOOL hadOverlay = (g_ipcCtx->hwndOverlay && IsWindow(g_ipcCtx->hwndOverlay));
+            if (!hadOverlay) {
+                g_ipcCtx->fileCount = 0;
+                g_ipcCtx->totalSizeBytes = 0;
+            }
+
             while (WaitForSingleObject(g_hStopEvent, 0) == WAIT_TIMEOUT) {
                 uint32_t len = 0;
                 if (!ReadFile(g_hPipe, &len, sizeof(uint32_t), &bytesRead, NULL) || bytesRead == 0) {
@@ -105,11 +117,16 @@ static unsigned __stdcall IPC_ServerWorker(void *arg) {
                     g_ipcCtx->files[g_ipcCtx->fileCount][MAX_PATH - 1] = L'\0';
                     g_ipcCtx->totalSizeBytes += Magify_GetFileSize(tempPath);
                     g_ipcCtx->fileCount++;
+                    newFilesCount++;
+                }
+            }
 
-                    // Trigger overlay update
-                    if (g_ipcCtx->hwndOverlay && IsWindow(g_ipcCtx->hwndOverlay)) {
-                        PostMessageW(g_ipcCtx->hwndOverlay, WM_USER + 101, 0, 0);
-                    }
+            if (newFilesCount > 0) {
+                g_ipcCtx->primaryClass = Magify_DetectFileClass(g_ipcCtx->files[0]);
+                if (hadOverlay && g_ipcCtx->hwndOverlay && IsWindow(g_ipcCtx->hwndOverlay)) {
+                    PostMessageW(g_ipcCtx->hwndOverlay, WM_USER + 101, 0, 0);
+                } else if (g_mainThreadId != 0) {
+                    PostThreadMessageW(g_mainThreadId, WM_USER + 105, 0, 0);
                 }
             }
         }
@@ -124,6 +141,7 @@ static unsigned __stdcall IPC_ServerWorker(void *arg) {
 
 BOOL Magify_IPC_StartServer(MagifyContext *ctx) {
     g_ipcCtx = ctx;
+    g_mainThreadId = GetCurrentThreadId();
     g_hStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
     if (!g_hStopEvent) return FALSE;
 
