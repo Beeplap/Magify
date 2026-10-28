@@ -36,8 +36,10 @@ install: $(TARGET)
 uninstall: $(TARGET)
 	$(TARGET) --uninstall
 
-test: $(TARGET)
-	$(CC) -std=c11 -O3 -Wall -Wextra -Werror -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o build/test_core.exe
+build/test_core.exe: tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c $(TARGET)
+	$(CC) -std=c11 -O3 -Wall -Wextra -Werror -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o $@
+
+test: build/test_core.exe
 	build/test_core.exe
 
 .PHONY: all clean install uninstall test

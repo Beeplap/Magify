@@ -29,7 +29,7 @@ jobs:
             mingw-w64-x86_64-make
             make
 
-      - name: Build Magify & Run Automated Tests
+      - name: Build Magify & Test Suite
         shell: msys2 {0}
         run: |
           cd magify
@@ -37,14 +37,18 @@ jobs:
           if [ -f pdfium.dll ]; then cp -f pdfium.dll build/pdfium.dll; fi
           make clean
           make all
+          make build/test_core.exe
           cd ..
           mkdir -p build
           cp -f magify/build/magify.exe build/magify.exe
-          if [ -f magify/pdfium.dll ]; then cp -f magify/pdfium.dll build/pdfium.dll; fi
-          cd magify
-          make test
-          cd ..
           cp -f magify/build/test_core.exe build/test_core.exe
+          if [ -f magify/pdfium.dll ]; then cp -f magify/pdfium.dll build/pdfium.dll; fi
+
+      - name: Run Core Test Suite
+        shell: pwsh
+        run: |
+          cd magify
+          .\build\test_core.exe
 
       - name: Package Distribution Archive
         shell: pwsh

@@ -68,6 +68,7 @@ echo [INFO] Creating Desktop and Start Menu shortcuts...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$ws = New-Object -ComObject WScript.Shell; " ^
     "$dDir = [Environment]::GetFolderPath('Desktop'); " ^
+    "if ([string]::IsNullOrWhiteSpace($dDir)) { $dDir = [Environment]::ExpandEnvironmentVariables('%%USERPROFILE%%\Desktop') }; " ^
     "if (-not (Test-Path $dDir)) { New-Item -ItemType Directory -Path $dDir -Force | Out-Null }; " ^
     "$dPath = $dDir + '\Magify.lnk'; " ^
     "$s1 = $ws.CreateShortcut($dPath); " ^
@@ -77,6 +78,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "$s1.IconLocation = '!INSTALL_DIR!\magify.exe,0'; " ^
     "$s1.Save(); " ^
     "$smDir = [Environment]::GetFolderPath('StartMenu') + '\Programs'; " ^
+    "if ([string]::IsNullOrWhiteSpace($smDir)) { $smDir = [Environment]::ExpandEnvironmentVariables('%%APPDATA%%\Microsoft\Windows\Start Menu\Programs') }; " ^
     "if (-not (Test-Path $smDir)) { New-Item -ItemType Directory -Path $smDir -Force | Out-Null }; " ^
     "$s2 = $ws.CreateShortcut($smDir + '\Magify.lnk'); " ^
     "$s2.TargetPath = '!INSTALL_DIR!\magify.exe'; " ^
