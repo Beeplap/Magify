@@ -87,10 +87,13 @@ jobs:
           $env:Path = "C:\msys64\mingw64\bin;" + $env:Path
           cd magify
           $output = & .\build\test_core.exe 2>&1
-          $summary = "### Magify Core Automated Test Suite Output`n````n" + ($output -join "`n") + "`n```"
-          Set-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary -Encoding utf8
-          $output | ForEach-Object { Write-Host $_ }
+          $output | ForEach-Object {
+            Write-Host $_
+            if ($_ -match "Assertion|failed|Error") {
+              Write-Host "::error::$($_)"
+            }
+          }
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "Test suite exited with code $LASTEXITCODE"
+            Write-Error "Test suite exited with exit code $LASTEXITCODE"
             exit $LASTEXITCODE
           }
