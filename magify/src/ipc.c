@@ -9,26 +9,40 @@ static MagifyContext *g_ipcCtx = NULL;
 static DWORD g_mainThreadId = 0;
 
 BOOL Magify_IPC_IsServerRunning(void) {
-    return WaitNamedPipeW(MAGIFY_PIPE_NAME, 30);
+    return WaitNamedPipeW(MAGIFY_PIPE_NAME, 200);
 }
 
 BOOL Magify_IPC_SendFileList(const WCHAR **paths, int count) {
     if (!paths || count <= 0) return FALSE;
 
-    // Check if pipe exists with a quick wait
-    if (!WaitNamedPipeW(MAGIFY_PIPE_NAME, 45)) {
-        return FALSE;
-    }
+    HANDLE hPipe = INVALID_HANDLE_VALUE;
+    // Robust connection loop with retry for busy or pending server states
+    for (int retry = 0; retry < 50; retry++) {
+        hPipe = CreateFileW(
+            MAGIFY_PIPE_NAME,
+            GENERIC_WRITE,
+            0,
+            NULL,
+            OPEN_EXISTING,
+            0,
+            NULL
+        );
 
-    HANDLE hPipe = CreateFileW(
-        MAGIFY_PIPE_NAME,
-        GENERIC_WRITE,
-        0,
-        NULL,
-        OPEN_EXISTING,
-        0,
-        NULL
-    );
+        if (hPipe != INVALID_HANDLE_VALUE) {
+            break;
+        }
+
+        DWORD err = GetLastError();
+        if (err == ERROR_PIPE_BUSY) {
+            if (!WaitNamedPipeW(MAGIFY_PIPE_NAME, 100)) {
+                Sleep(20);
+            }
+        } else if (err == ERROR_FILE_NOT_FOUND) {
+            Sleep(30);
+        } else {
+            Sleep(20);
+        }
+    }
 
     if (hPipe == INVALID_HANDLE_VALUE) {
         return FALSE;

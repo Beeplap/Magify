@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <shlwapi.h>
+#include <shlobj.h>
 
 int wmain(void) {
     setbuf(stdout, NULL);
@@ -657,6 +658,14 @@ int wmain(void) {
     WCHAR deskLnk[MAX_PATH];
     ExpandEnvironmentStringsW(L"%USERPROFILE%\\Desktop\\Magify.lnk", deskLnk, MAX_PATH);
     BOOL deskExists = (GetFileAttributesW(deskLnk) != INVALID_FILE_ATTRIBUTES);
+    if (!deskExists) {
+        WCHAR altDesk[MAX_PATH];
+        if (SHGetFolderPathW(NULL, CSIDL_DESKTOPDIRECTORY, NULL, 0, altDesk) == S_OK) {
+            wcscat(altDesk, L"\\Magify.lnk");
+            deskExists = (GetFileAttributesW(altDesk) != INVALID_FILE_ATTRIBUTES);
+            if (deskExists) wcsncpy(deskLnk, altDesk, MAX_PATH - 1);
+        }
+    }
     printf("  Desktop shortcut check: %ls -> %s\n", deskLnk, deskExists ? "FOUND" : "NOT FOUND");
     assert(deskExists);
 

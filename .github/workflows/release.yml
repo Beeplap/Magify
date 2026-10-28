@@ -37,12 +37,14 @@ jobs:
           if [ -f pdfium.dll ]; then cp -f pdfium.dll build/pdfium.dll; fi
           make clean
           make all
-          make test
           cd ..
           mkdir -p build
           cp -f magify/build/magify.exe build/magify.exe
-          cp -f magify/build/test_core.exe build/test_core.exe
           if [ -f magify/pdfium.dll ]; then cp -f magify/pdfium.dll build/pdfium.dll; fi
+          cd magify
+          make test
+          cd ..
+          cp -f magify/build/test_core.exe build/test_core.exe
 
       - name: Package Distribution Archive
         shell: pwsh
