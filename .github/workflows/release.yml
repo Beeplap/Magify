@@ -44,13 +44,6 @@ jobs:
           cp -f magify/build/test_core.exe build/test_core.exe
           if [ -f magify/pdfium.dll ]; then cp -f magify/pdfium.dll build/pdfium.dll; fi
 
-      - name: Run Core Test Suite
-        shell: pwsh
-        run: |
-          $env:Path = "C:\msys64\mingw64\bin;" + $env:Path
-          cd magify
-          .\build\test_core.exe
-
       - name: Package Distribution Archive
         shell: pwsh
         run: |
@@ -87,3 +80,17 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Core Test Suite
+        shell: pwsh
+        run: |
+          $env:Path = "C:\msys64\mingw64\bin;" + $env:Path
+          cd magify
+          $output = & .\build\test_core.exe 2>&1
+          $summary = "### Magify Core Automated Test Suite Output`n````n" + ($output -join "`n") + "`n```"
+          Set-Content -Path $env:GITHUB_STEP_SUMMARY -Value $summary -Encoding utf8
+          $output | ForEach-Object { Write-Host $_ }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Test suite exited with code $LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
