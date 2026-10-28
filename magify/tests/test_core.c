@@ -643,9 +643,9 @@ int wmain(void) {
         ExpandEnvironmentStringsW(L"%USERPROFILE%\\Desktop", deskDir, MAX_PATH);
         CreateDirectoryW(deskDir, NULL);
         if (GetFileAttributesW(L"setup.bat") != INVALID_FILE_ATTRIBUTES) {
-            system("cmd.exe /c setup.bat >nul 2>nul");
+            system("cmd.exe /c setup.bat --no-daemon >nul 2>nul");
         } else if (GetFileAttributesW(L"..\\setup.bat") != INVALID_FILE_ATTRIBUTES) {
-            system("cmd.exe /c ..\\setup.bat >nul 2>nul");
+            system("cmd.exe /c ..\\setup.bat --no-daemon >nul 2>nul");
         }
         attr = GetFileAttributesW(localApp);
         exeExists = (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
@@ -663,6 +663,10 @@ int wmain(void) {
     BOOL isReg = Magify_IsRegistered();
     printf("  Modern Windows 11 Context Menu registration status: %s\n", isReg ? "ACTIVE" : "INACTIVE");
     assert(isReg);
+
+    // Isolate test environment by terminating any daemon launched during installation
+    system("taskkill /f /im magify.exe >nul 2>nul");
+    Sleep(100);
     printf("  Installer verification completed with 100%% success!\n");
 
     // ---------------------------------------------------------
@@ -761,14 +765,21 @@ int wmain(void) {
     // 24. Rapid Multi-Instance IPC Burst Stress Test
     // ---------------------------------------------------------
     printf("\n[24/24] Testing Rapid Multi-Instance IPC Burst Stress Test...\n");
+    // Ensure no background daemon or lingering magify process holds the pipe
+    system("taskkill /f /im magify.exe >nul 2>nul");
+    Sleep(100);
+
     MagifyContext ipcCtx;
     memset(&ipcCtx, 0, sizeof(ipcCtx));
     BOOL srvStarted = Magify_IPC_StartServer(&ipcCtx);
     assert(srvStarted);
     printf("  Named pipe IPC server started on \\\\.\\pipe\\MagifyPipe\n");
 
-    // Give server thread a few ms to enter listen state
-    Sleep(50);
+    // Wait until server thread enters active listen state
+    for (int w = 0; w < 50; w++) {
+        if (Magify_IPC_IsServerRunning()) break;
+        Sleep(10);
+    }
 
     // Send rapid burst of 10 file paths via client IPC
     const WCHAR *burstFiles[10] = {
@@ -788,8 +799,11 @@ int wmain(void) {
     printf("  Burst of 10 paths sent via named pipe: %s\n", burstSent ? "SUCCESS" : "FAILED");
     assert(burstSent);
 
-    // Wait 100ms for server to process burst
-    Sleep(100);
+    // Wait for server to process burst (poll up to 2.5 seconds)
+    for (int t = 0; t < 125; t++) {
+        if (ipcCtx.fileCount == 10) break;
+        Sleep(20);
+    }
 
     // Verify files were received safely without buffer overflows
     printf("  IPC server received: %d files (primary file: %ls)\n", ipcCtx.fileCount, ipcCtx.files[0]);
@@ -798,6 +812,7 @@ int wmain(void) {
     assert(wcscmp(ipcCtx.files[9], L"C:\\Test\\doc10.pdf") == 0);
 
     Magify_IPC_StopServer();
+    system("taskkill /f /im magify.exe >nul 2>nul");
     printf("  Named pipe server gracefully stopped without deadlocks or lingering handles.\n");
 
     Magify_Image_Shutdown();

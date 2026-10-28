@@ -9,6 +9,10 @@ echo.
 if "%1"=="--uninstall" goto do_uninstall
 if "%1"=="/u" goto do_uninstall
 if "%1"=="-u" goto do_uninstall
+if "%1"=="--no-daemon" set "NO_DAEMON=1"
+if "%2"=="--no-daemon" set "NO_DAEMON=1"
+if "%1"=="--test" set "NO_DAEMON=1"
+if "%2"=="--test" set "NO_DAEMON=1"
 
 set "INSTALL_DIR=%LOCALAPPDATA%\Programs\Magify"
 
@@ -53,8 +57,12 @@ if exist "%~dp0magify\assets\magify.ico" copy /y "%~dp0magify\assets\magify.ico"
 echo [INFO] Registering Windows 11 Modern Context Menu and Auto-Start...
 "!INSTALL_DIR!\magify.exe" --install
 
-echo [INFO] Starting Magify Background Daemon...
-start "" "!INSTALL_DIR!\magify.exe" --background
+if not defined NO_DAEMON (
+    echo [INFO] Starting Magify Background Daemon...
+    start "" "!INSTALL_DIR!\magify.exe" --background
+) else (
+    echo [INFO] Skipping Background Daemon launch (--no-daemon requested).
+)
 
 echo [INFO] Creating Desktop and Start Menu shortcuts...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^

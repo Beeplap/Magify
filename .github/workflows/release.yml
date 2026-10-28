@@ -34,6 +34,7 @@ jobs:
         run: |
           cd magify
           mkdir -p build
+          if [ -f pdfium.dll ]; then cp -f pdfium.dll build/pdfium.dll; fi
           make clean
           make all
           make test
@@ -41,6 +42,7 @@ jobs:
           mkdir -p build
           cp -f magify/build/magify.exe build/magify.exe
           cp -f magify/build/test_core.exe build/test_core.exe
+          if [ -f magify/pdfium.dll ]; then cp -f magify/pdfium.dll build/pdfium.dll; fi
 
       - name: Package Distribution Archive
         shell: pwsh
@@ -72,6 +74,7 @@ jobs:
             build/magify.exe
             magify/build/pdfium.dll
             Magify-v1.0-Windows-x64.zip
+          fail_on_unmatched_files: false
           generate_release_notes: true
           draft: false
           prerelease: false

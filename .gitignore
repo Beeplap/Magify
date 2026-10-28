@@ -10,6 +10,7 @@ magify/build/
 *.lib
 *.a
 *.dll
+!magify/pdfium.dll
 *.so
 *.dylib
 
@@ -43,3 +44,4 @@ magify/test_assets/renamed_*
 *.swp
 *.zip
 dist/
+.codex-tmp/
