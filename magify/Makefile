@@ -2,7 +2,7 @@ CC ?= gcc
 WINDRES ?= windres
 
 CFLAGS = -std=c11 -O3 -Wall -Wextra -Werror -municode -mwindows -Iinclude -Ithird_party
-LDFLAGS = -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
+LDFLAGS = -static -static-libgcc -municode -mwindows -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus
 
 SRCS = src/main.c src/ipc.c src/registry.c src/com_extension.c src/ui_overlay.c \
        src/ops_common.c src/ops_image.c src/ops_pdf.c
@@ -37,7 +37,7 @@ uninstall: $(TARGET)
 	$(TARGET) --uninstall
 
 build/test_core.exe: tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c $(TARGET)
-	$(CC) -std=c11 -O3 -Wall -Wextra -Werror -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o $@
+	$(CC) -std=c11 -O3 -Wall -Wextra -Werror -static -static-libgcc -municode -Iinclude -Ithird_party tests/test_core.c src/com_extension.c src/registry.c src/ipc.c src/ops_common.c src/ui_overlay.c src/ops_image.c src/ops_pdf.c -municode -lgdi32 -luser32 -lshell32 -lole32 -luuid -lwindowscodecs -lshlwapi -ldwmapi -lcomctl32 -lcomdlg32 -ladvapi32 -lgdiplus -o $@
 
 test: build/test_core.exe
 	build/test_core.exe

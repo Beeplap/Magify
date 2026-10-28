@@ -47,6 +47,7 @@ jobs:
       - name: Run Core Test Suite
         shell: pwsh
         run: |
+          $env:Path = "C:\msys64\mingw64\bin;" + $env:Path
           cd magify
           .\build\test_core.exe
 
