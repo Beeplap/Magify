@@ -775,6 +775,7 @@ static void RenderRadialMenu(MagifyContext *ctx) {
 
     float globalAlpha = ctx->isClosing ? (1.0f - ctx->closeProgress) : ClampFloat(t * 1.5f, 0.0f, 1.0f);
     if (globalAlpha <= 0.001f) return;
+    animScale *= ctx->dpiScale;
 
     // Center Hub smooth expansion when processing
     float hubTarget = (ctx->uiState == UI_STATE_PROCESSING) ? 1.0f : 0.0f;
@@ -1097,6 +1098,8 @@ void Magify_RedrawOverlay(MagifyContext *ctx) {
 
 void Magify_CloseOverlay(MagifyContext *ctx) {
     if (!ctx || ctx->isClosing) return;
+    if (InterlockedCompareExchange(&ctx->isProcessing, 0, 0))
+        InterlockedExchange(&ctx->cancelRequested, 1);
     ctx->isClosing = TRUE;
     ctx->closeProgress = 0.0f;
 }
@@ -1877,6 +1880,12 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
         case WM_TIMER: {
             if (wParam == TIMER_ANIM_ID) {
+                if (ctx->hWorkerThread && WaitForSingleObject(ctx->hWorkerThread, 0) == WAIT_OBJECT_0) {
+                    CloseHandle(ctx->hWorkerThread);
+                    ctx->hWorkerThread = NULL;
+                }
+                if (ctx->uiState == UI_STATE_CLOSING && !ctx->hWorkerThread && !ctx->isClosing)
+                    Magify_CloseOverlay(ctx);
                 // Immediate global ESC key check: instant dismissal even across windows!
                 if (!ctx->isClosing && (GetAsyncKeyState(VK_ESCAPE) & 0x8000)) {
                     if (ctx->uiState == UI_STATE_IMAGE_EDIT || ctx->uiState == UI_STATE_PDF_EDIT || ctx->uiState == UI_STATE_RENAME_HUD) {
@@ -1905,6 +1914,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 } else {
                     ctx->closeProgress += 0.12f;
                     if (ctx->closeProgress >= 1.0f) {
+                        ctx->closeProgress = 1.0f;
+                        // Keep the (now transparent) window/context alive until
+                        // cancellation finishes; the UI thread never blocks.
+                        if (ctx->hWorkerThread) return 0;
                         KillTimer(hwnd, TIMER_ANIM_ID);
                         KillTimer(hwnd, TIMER_CARET_ID);
                         DestroyWindow(hwnd);
@@ -1956,7 +1969,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
             int hit = Magify_HitTestRadial(
                 (float)mx, (float)my, cx, cy,
-                52.0f, 155.0f, sliceCount, rotOffset
+                52.0f * ctx->dpiScale, 155.0f * ctx->dpiScale, sliceCount, rotOffset
             );
 
             if (hit != ctx->hoveredSlice) {
@@ -2345,11 +2358,15 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         }
 
         case WM_ACTIVATE: {
-            if (LOWORD(wParam) == WA_INACTIVE && ctx->uiState < UI_STATE_RENAME_HUD) {
+            if (ctx && LOWORD(wParam) == WA_INACTIVE && ctx->uiState < UI_STATE_RENAME_HUD) {
                 Magify_CloseOverlay(ctx);
             }
             return 0;
         }
+
+        case WM_CLOSE:
+            Magify_CloseOverlay(ctx);
+            return 0;
 
         case WM_DESTROY: {
             if (ctx) Magify_CancelWorker(ctx);
@@ -2370,8 +2387,8 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             g_surfWidth = 0;
             g_surfHeight = 0;
             Magify_Image_Shutdown();
+            if (ctx) ctx->hwndOverlay = NULL;
             if (ctx && ctx->isBackgroundMode) {
-                ctx->hwndOverlay = NULL;
                 return 0;
             }
             PostQuitMessage(0);
@@ -2434,10 +2451,13 @@ void Magify_ShowOverlay(MagifyContext *ctx) {
     InitDIB(hdcScreen, ctx->overlayWidth, ctx->overlayHeight);
     ReleaseDC(NULL, hdcScreen);
 
-    ctx->animProgress = 0.0f;
+    ctx->animProgress = 0.08f;
     ctx->closeProgress = 0.0f;
     ctx->isClosing = FALSE;
     ctx->hoveredSlice = -1;
+
+    for (int i = 0; i < 8; ++i) g_sliceHover[i] = 0.0f;
+    g_hubHover = 0.0f;
 
     ctx->hwndOverlay = Magify_CreateOverlayWindow(
         ctx->hInstance,
@@ -2448,20 +2468,14 @@ void Magify_ShowOverlay(MagifyContext *ctx) {
 
     if (!ctx->hwndOverlay) return;
 
-    ShowWindow(ctx->hwndOverlay, SW_SHOW);
+    // Publish pixels before activation so Explorer's closing menu cannot
+    // deactivate a briefly empty, newly shown layered window.
+    RenderFrame(ctx);
+    ShowWindow(ctx->hwndOverlay, SW_SHOWNOACTIVATE);
     UpdateWindow(ctx->hwndOverlay);
 
-    DWORD foreThread = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
-    DWORD curThread = GetCurrentThreadId();
-    if (foreThread && foreThread != curThread) {
-        AttachThreadInput(curThread, foreThread, TRUE);
-        SetForegroundWindow(ctx->hwndOverlay);
-        SetFocus(ctx->hwndOverlay);
-        AttachThreadInput(curThread, foreThread, FALSE);
-    } else {
-        SetForegroundWindow(ctx->hwndOverlay);
-        SetFocus(ctx->hwndOverlay);
-    }
+    SetForegroundWindow(ctx->hwndOverlay);
+    SetFocus(ctx->hwndOverlay);
 
     RenderFrame(ctx);
 }

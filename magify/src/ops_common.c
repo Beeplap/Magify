@@ -159,11 +159,9 @@ static unsigned __stdcall WorkerWrapper(void *param) {
         } else {
             ctx->uiState = UI_STATE_CLOSING;
         }
-        ctx->isProcessing = 0;
-        if (ctx->hWorkerThread) {
-            CloseHandle(ctx->hWorkerThread);
-            ctx->hWorkerThread = NULL;
-        }
+        // The UI owns the handle and may recycle this context only after the
+        // thread has exited. Never close our own handle behind its back.
+        InterlockedExchange(&ctx->isProcessing, 0);
     }
     free(wp);
     return 0;
@@ -198,13 +196,14 @@ void Magify_LaunchWorker(MagifyContext *ctx, LPTHREAD_START_ROUTINE func, void *
 
 void Magify_CancelWorker(MagifyContext *ctx) {
     if (!ctx) return;
-    ctx->cancelRequested = 1;
-    if (ctx->hWorkerThread) {
-        WaitForSingleObject(ctx->hWorkerThread, 150);
+    InterlockedExchange(&ctx->cancelRequested, 1);
+    // Cancellation is cooperative. Closing a live thread's handle does not
+    // stop it, and would let a later invocation reuse its files and buffers.
+    if (ctx->hWorkerThread && WaitForSingleObject(ctx->hWorkerThread, 0) == WAIT_OBJECT_0) {
         CloseHandle(ctx->hWorkerThread);
         ctx->hWorkerThread = NULL;
+        InterlockedExchange(&ctx->isProcessing, 0);
     }
-    ctx->isProcessing = 0;
 }
 
 BOOL Magify_GetSafeOutputPath(const WCHAR *srcPath, const WCHAR *suffix, const WCHAR *newExt,

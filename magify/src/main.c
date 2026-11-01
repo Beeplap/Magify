@@ -4,6 +4,8 @@
 #include "com_extension.h"
 #include "ui_overlay.h"
 #include "ops_common.h"
+#include "activation.h"
+#include <process.h>
 #include <stdio.h>
 #include <dwmapi.h>
 #include <commctrl.h>
@@ -650,6 +652,131 @@ static void ShowDashboard(HINSTANCE hInst) {
     DeleteDashboardFonts();
 }
 
+#define MAGIFY_HOTKEY 1
+#define MAGIFY_WM_SELECTION (WM_APP + 106)
+
+typedef struct {
+    MagifyFileList files;
+    HWND foreground;
+    HWND receiver;
+    POINT cursor;
+    HRESULT result;
+} SelectionRequest;
+
+static HANDLE g_selectionThread = NULL;
+static BOOL g_pickerOpen = FALSE;
+
+static void OpenSessionOverlay(MagifyContext *ctx) {
+    if (ctx->hwndOverlay) {
+        ctx->isClosing = FALSE;
+        ctx->closeProgress = 0.0f;
+        SetForegroundWindow(ctx->hwndOverlay);
+        Magify_RedrawOverlay(ctx);
+        return;
+    }
+    GetCursorPos(&ctx->spawnCursor);
+    ctx->uiState = UI_STATE_RADIAL_ROOT;
+    ctx->activeSubmenu = SUBMENU_NONE;
+    ctx->jobProgress = 0;
+    ctx->progressPercent = 0;
+    ctx->isErrorState = FALSE;
+    ctx->isSuccessState = FALSE;
+    ctx->completionTick = 0;
+    ctx->hubExpandAnim = 0.0f;
+    ctx->statusText[0] = L'\0';
+    ctx->progressStatusText[0] = L'\0';
+    Magify_ShowOverlay(ctx);
+}
+
+static unsigned __stdcall SelectionWorker(void *arg) {
+    SelectionRequest *request = arg;
+    HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    request->result = FAILED(init) ? init : Magify_GetExplorerSelection(request->foreground, &request->files);
+    if (SUCCEEDED(init)) CoUninitialize();
+    if (!PostMessageW(request->receiver, MAGIFY_WM_SELECTION, 0, (LPARAM)request)) free(request);
+    return 0;
+}
+
+static LRESULT CALLBACK SessionWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    MagifyContext *ctx = (MagifyContext*)GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+    if (message == WM_CREATE) {
+        CREATESTRUCTW *create = (CREATESTRUCTW*)lParam;
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)create->lpCreateParams);
+        return 0;
+    }
+    if (!ctx) return DefWindowProcW(hwnd, message, wParam, lParam);
+    if (message == MAGIFY_WM_FILES) {
+        if (Magify_IPC_ApplyFileList(ctx, lParam)) OpenSessionOverlay(ctx);
+        else if (ctx->hwndOverlay) SetForegroundWindow(ctx->hwndOverlay);
+        return 0;
+    }
+    if (message == WM_HOTKEY && wParam == MAGIFY_HOTKEY) {
+        if (ctx->hwndOverlay) {
+            Magify_CloseOverlay(ctx);
+        } else if (!g_selectionThread && !g_pickerOpen) {
+            SelectionRequest *request = calloc(1, sizeof(*request));
+            if (!request) return 0;
+            request->foreground = GetForegroundWindow();
+            request->receiver = hwnd;
+            GetCursorPos(&request->cursor);
+            g_selectionThread = (HANDLE)_beginthreadex(NULL, 0, SelectionWorker, request, 0, NULL);
+            if (!g_selectionThread) free(request);
+        }
+        return 0;
+    }
+    if (message == MAGIFY_WM_SELECTION) {
+        SelectionRequest *request = (SelectionRequest*)lParam;
+        if (g_selectionThread) {
+            WaitForSingleObject(g_selectionThread, INFINITE);
+            CloseHandle(g_selectionThread);
+            g_selectionThread = NULL;
+        }
+        /* A slow Shell extension must not open a wheel over a different app. */
+        if (GetForegroundWindow() != request->foreground || ctx->hwndOverlay) {
+            free(request);
+            return 0;
+        }
+        HRESULT hr = request->result;
+        if (hr == HRESULT_FROM_WIN32(ERROR_BUFFER_OVERFLOW) ||
+            hr == HRESULT_FROM_WIN32(ERROR_FILENAME_EXCED_RANGE)) {
+            MessageBoxW(NULL, L"Select at most 64 files with paths shorter than 260 characters.",
+                        L"Magify selection", MB_OK | MB_ICONINFORMATION);
+        } else {
+            if (hr != S_OK || !request->files.count) {
+                g_pickerOpen = TRUE;
+                hr = Magify_PickFiles(&request->files);
+                g_pickerOpen = FALSE;
+            }
+            if (hr == S_OK && request->files.count && !ctx->hwndOverlay) {
+                ctx->fileCount = request->files.count;
+                ctx->totalSizeBytes = 0;
+                for (int i = 0; i < ctx->fileCount; ++i) {
+                    wcscpy(ctx->files[i], request->files.paths[i]);
+                    ctx->totalSizeBytes += Magify_GetFileSize(ctx->files[i]);
+                }
+                ctx->primaryClass = Magify_DetectFileClass(ctx->files[0]);
+                OpenSessionOverlay(ctx);
+            }
+        }
+        free(request);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
+
+static void StartBackgroundProcess(void) {
+    WCHAR exe[MAX_PATH], command[MAX_PATH + 32];
+    if (!GetModuleFileNameW(NULL, exe, MAX_PATH)) return;
+    swprintf(command, MAX_PATH + 32, L"\"%ls\" --background", exe);
+    STARTUPINFOW startup = {0};
+    PROCESS_INFORMATION process = {0};
+    startup.cb = sizeof(startup);
+    if (CreateProcessW(exe, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &startup, &process)) {
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+    }
+}
+
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine, int nCmdShow) {
     (void)hPrevInstance;
     (void)pCmdLine;
@@ -694,54 +821,16 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         }
     }
 
-    if (isBackground) {
-        if (Magify_IPC_IsServerRunning()) {
-            LocalFree(argv);
-            return 0; // Already running in background
-        }
-        LocalFree(argv);
-
-        MagifyContext bgCtx;
-        memset(&bgCtx, 0, sizeof(bgCtx));
-        bgCtx.hInstance = hInstance;
-        bgCtx.isBackgroundMode = TRUE;
-
-        Magify_IPC_StartServer(&bgCtx);
-
-        MSG msg;
-        while (GetMessageW(&msg, NULL, 0, 0)) {
-            if (msg.message == WM_USER + 105) {
-                GetCursorPos(&bgCtx.spawnCursor);
-                bgCtx.dpiScale = Magify_GetDpiScaleForPoint(bgCtx.spawnCursor);
-                bgCtx.overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * bgCtx.dpiScale);
-                bgCtx.overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * bgCtx.dpiScale);
-                bgCtx.uiState = UI_STATE_RADIAL_ROOT;
-                bgCtx.activeSubmenu = SUBMENU_NONE;
-                bgCtx.hoveredSlice = -1;
-                bgCtx.jobProgress = 0;
-                bgCtx.progressPercent = 0;
-                bgCtx.isErrorState = FALSE;
-                bgCtx.statusText[0] = L'\0';
-                Magify_ShowOverlay(&bgCtx);
-                continue;
-            }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        Magify_IPC_StopServer();
-        return 0;
-    }
-
     // Double-clicked or launched with zero file args -> open Dashboard
-    if (argc <= 1) {
+    if (!isBackground && argc <= 1) {
         LocalFree(argv);
+        if (!Magify_IPC_IsServerRunning()) StartBackgroundProcess();
         ShowDashboard(hInstance);
         return 0;
     }
 
     // Try sending paths to existing primary instance via Named Pipe
-    if (Magify_IPC_SendPathsToPrimary(argc, argv)) {
+    if (!isBackground && Magify_IPC_SendPathsToPrimary(argc, argv)) {
         LocalFree(argv);
         return 0; // Handed off to existing primary instance!
     }
@@ -750,13 +839,15 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
     MagifyContext ctx;
     memset(&ctx, 0, sizeof(ctx));
     ctx.hInstance = hInstance;
+    // Keep the shortcut available after dismissing a file's wheel.
+    ctx.isBackgroundMode = TRUE;
     GetCursorPos(&ctx.spawnCursor);
     ctx.dpiScale = Magify_GetDpiScaleForPoint(ctx.spawnCursor);
     ctx.overlayWidth = (int)(MAGIFY_RADIAL_WIDTH * ctx.dpiScale);
     ctx.overlayHeight = (int)(MAGIFY_RADIAL_HEIGHT * ctx.dpiScale);
 
     // Collect initial files
-    for (int i = 1; i < argc && ctx.fileCount < MAGIFY_MAX_FILES; i++) {
+    for (int i = 1; !isBackground && i < argc && ctx.fileCount < MAGIFY_MAX_FILES; i++) {
         const WCHAR *p = argv[i];
         if (p && p[0] != L'-') {
             wcsncpy(ctx.files[ctx.fileCount], p, MAX_PATH - 1);
@@ -765,7 +856,6 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
             ctx.fileCount++;
         }
     }
-    LocalFree(argv);
 
     if (ctx.fileCount > 0) {
         ctx.primaryClass = Magify_DetectFileClass(ctx.files[0]);
@@ -773,20 +863,52 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR pCmdLine
         ctx.primaryClass = FILE_CLASS_GENERIC;
     }
 
-    // Start single-instance IPC Named Pipe Server
-    Magify_IPC_StartServer(&ctx);
+    WNDCLASSW dispatcherClass = {0};
+    dispatcherClass.hInstance = hInstance;
+    dispatcherClass.lpfnWndProc = SessionWndProc;
+    dispatcherClass.lpszClassName = L"MagifySessionDispatcher";
+    RegisterClassW(&dispatcherClass);
+    ctx.hwndDispatcher = CreateWindowExW(0, dispatcherClass.lpszClassName, L"Magify Session",
+        0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInstance, &ctx);
+    if (!ctx.hwndDispatcher) { LocalFree(argv); return 1; }
 
-    // Show Radial Overlay
-    Magify_ShowOverlay(&ctx);
+    // Atomic owner election prevents simultaneous cold starts owning competing pipes.
+    if (!Magify_IPC_StartServer(&ctx)) {
+        BOOL sent = isBackground && Magify_IPC_IsServerRunning();
+        for (int attempt = 0; !isBackground && !sent && attempt < 40; ++attempt) {
+            sent = Magify_IPC_SendPathsToPrimary(argc, argv);
+            if (!sent) Sleep(25);
+        }
+        DestroyWindow(ctx.hwndDispatcher);
+        LocalFree(argv);
+        return sent ? 0 : 1;
+    }
+    LocalFree(argv);
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    BOOL hotkey = RegisterHotKey(ctx.hwndDispatcher, MAGIFY_HOTKEY, MOD_CONTROL | MOD_NOREPEAT, VK_SPACE);
+    if (!hotkey) MessageBoxW(NULL,
+        L"Ctrl+Space is already used by another application. Magify's context menu is still available.",
+        L"Magify keyboard shortcut", MB_OK | MB_ICONINFORMATION);
+    if (ctx.fileCount) OpenSessionOverlay(&ctx);
 
     MSG msg;
-    while (GetMessageW(&msg, NULL, 0, 0)) {
+    while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
     // Stop IPC Server before exit
     Magify_IPC_StopServer();
+    if (hotkey) UnregisterHotKey(ctx.hwndDispatcher, MAGIFY_HOTKEY);
+    if (g_selectionThread) {
+        WaitForSingleObject(g_selectionThread, INFINITE);
+        CloseHandle(g_selectionThread);
+        g_selectionThread = NULL;
+    }
+    while (PeekMessageW(&msg, ctx.hwndDispatcher, MAGIFY_WM_SELECTION, MAGIFY_WM_SELECTION, PM_REMOVE))
+        free((void*)msg.lParam);
+    DestroyWindow(ctx.hwndDispatcher);
+    if (SUCCEEDED(com)) CoUninitialize();
 
     return 0;
 }

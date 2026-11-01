@@ -70,6 +70,7 @@ typedef struct {
 typedef struct {
     HINSTANCE       hInstance;
     HWND            hwndOverlay;
+    HWND            hwndDispatcher;     // Resident UI-thread IPC/hotkey receiver
     POINT           spawnCursor;        // Screen coordinates where right-click invoked
     float           dpiScale;           // 1.0f = 96 DPI, 1.25f = 120 DPI, etc.
 

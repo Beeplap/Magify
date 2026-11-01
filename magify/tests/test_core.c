@@ -11,6 +11,11 @@
 #include <shlwapi.h>
 #include <shlobj.h>
 
+static DWORD WINAPI DelayedCancelWorker(void *arg) {
+    WaitForSingleObject((HANDLE)arg, 5000);
+    return 0;
+}
+
 int wmain(void) {
     setbuf(stdout, NULL);
     printf("====================================================\n");
@@ -443,15 +448,41 @@ int wmain(void) {
     assert(workerCtx.isProcessing == 1);
     Magify_CancelWorker(&workerCtx);
     assert(workerCtx.cancelRequested == 1);
+    if (workerCtx.hWorkerThread)
+        assert(WaitForSingleObject(workerCtx.hWorkerThread, 5000) == WAIT_OBJECT_0);
+    Magify_CancelWorker(&workerCtx);
     assert(workerCtx.isProcessing == 0);
     assert(workerCtx.hWorkerThread == NULL);
+    HANDLE cancelGate = CreateEventW(NULL, TRUE, FALSE, NULL);
+    assert(cancelGate);
+    Magify_LaunchWorker(&workerCtx, DelayedCancelWorker, cancelGate);
+    HANDLE retainedWorker = workerCtx.hWorkerThread;
+    assert(retainedWorker);
+    DWORD cancelTick = GetTickCount();
+    Magify_CancelWorker(&workerCtx);
+    assert(GetTickCount() - cancelTick < 100);
+    assert(workerCtx.hWorkerThread == retainedWorker);
+    assert(workerCtx.isProcessing == 1);
+    SetEvent(cancelGate);
+    assert(WaitForSingleObject(retainedWorker, 5000) == WAIT_OBJECT_0);
+    Magify_CancelWorker(&workerCtx);
+    assert(workerCtx.hWorkerThread == NULL);
+    assert(workerCtx.isProcessing == 0);
+    CloseHandle(cancelGate);
     printf("  Worker cancellation verified cleanly with zero hanging threads!\n");
 
     // ---------------------------------------------------------
     // 18. Windows 11 Modern IExplorerCommand & ContextMenus COM Registry
     // ---------------------------------------------------------
     printf("\n[18/24] Testing Windows 11 IExplorerCommand COM & Modern Context Menu Registration...\n");
-    // Test registration
+    // Isolate registration: never point the user's Explorer menu/autostart at
+    // test_core.exe (the old test left the live installation broken).
+    HKEY registrySandbox = NULL;
+    WCHAR sandboxKey[128];
+    swprintf(sandboxKey, 128, L"Software\\MagifyTestRegistry_%lu", GetCurrentProcessId());
+    assert(RegCreateKeyExW(HKEY_CURRENT_USER, sandboxKey, 0, NULL, 0,
+        KEY_ALL_ACCESS, NULL, &registrySandbox, NULL) == ERROR_SUCCESS);
+    assert(RegOverridePredefKey(HKEY_CURRENT_USER, registrySandbox) == ERROR_SUCCESS);
     BOOL regOk = Magify_RegisterContextMenu();
     assert(regOk);
     assert(Magify_IsRegistered());
@@ -514,6 +545,9 @@ int wmain(void) {
 
     pCmd->lpVtbl->Release(pCmd);
     CoUninitialize();
+    assert(RegOverridePredefKey(HKEY_CURRENT_USER, NULL) == ERROR_SUCCESS);
+    RegCloseKey(registrySandbox);
+    assert(RegDeleteTreeW(HKEY_CURRENT_USER, sandboxKey) == ERROR_SUCCESS);
     printf("  Pure-C COM IExplorerCommand virtual table & methods validated 100%%!\n");
 
     // ---------------------------------------------------------
@@ -827,8 +861,13 @@ int wmain(void) {
     printf("  Burst of 10 paths sent via named pipe: %s\n", burstSent ? "SUCCESS" : "FAILED");
     assert(burstSent);
 
-    // Wait for server to process burst (poll up to 2.5 seconds)
+    // The pipe worker must never mutate UI-owned context directly.
+    assert(ipcCtx.fileCount == 0);
+    // Dispatch the immutable packet on this (UI) thread.
     for (int t = 0; t < 125; t++) {
+        MSG packet;
+        while (PeekMessageW(&packet, NULL, MAGIFY_WM_FILES, MAGIFY_WM_FILES, PM_REMOVE))
+            assert(Magify_IPC_ApplyFileList(&ipcCtx, packet.lParam));
         if (ipcCtx.fileCount == 10) break;
         Sleep(20);
     }
@@ -839,6 +878,50 @@ int wmain(void) {
     assert(wcscmp(ipcCtx.files[0], L"C:\\Test\\doc1.pdf") == 0);
     assert(wcscmp(ipcCtx.files[9], L"C:\\Test\\doc10.pdf") == 0);
 
+    // Several Explorer processes may submit separate packets before UI dispatch.
+    ipcCtx.hwndOverlay = CreateWindowExW(0, L"STATIC", L"IPC test", 0,
+        0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandleW(NULL), NULL);
+    assert(ipcCtx.hwndOverlay);
+    const WCHAR *nextFiles[] = {L"C:\\Test\\doc11.pdf", L"C:\\Test\\doc12.pdf"};
+    assert(Magify_IPC_SendFileList(nextFiles, 1));
+    assert(Magify_IPC_SendFileList(nextFiles + 1, 1));
+    assert(ipcCtx.fileCount == 10);
+    MSG packet;
+    while (PeekMessageW(&packet, NULL, MAGIFY_WM_FILES, MAGIFY_WM_FILES, PM_REMOVE))
+        assert(Magify_IPC_ApplyFileList(&ipcCtx, packet.lParam));
+    assert(ipcCtx.fileCount == 12);
+    assert(Magify_IPC_SendFileList(nextFiles, 1));
+    assert(PeekMessageW(&packet, NULL, MAGIFY_WM_FILES, MAGIFY_WM_FILES, PM_REMOVE));
+    assert(Magify_IPC_ApplyFileList(&ipcCtx, packet.lParam));
+    assert(ipcCtx.fileCount == 12); // Duplicates still wake the wheel.
+
+    InterlockedExchange(&ipcCtx.isProcessing, 1);
+    const WCHAR *busyFile[] = {L"C:\\Test\\busy.pdf"};
+    assert(Magify_IPC_SendFileList(busyFile, 1));
+    assert(PeekMessageW(&packet, NULL, MAGIFY_WM_FILES, MAGIFY_WM_FILES, PM_REMOVE));
+    assert(!Magify_IPC_ApplyFileList(&ipcCtx, packet.lParam));
+    assert(ipcCtx.fileCount == 12); // Active worker inputs stay immutable.
+    InterlockedExchange(&ipcCtx.isProcessing, 0);
+    DestroyWindow(ipcCtx.hwndOverlay);
+    ipcCtx.hwndOverlay = NULL;
+
+    // A new invocation after dismissal replaces the previous selection.
+    assert(Magify_IPC_SendFileList(nextFiles, 1));
+    assert(PeekMessageW(&packet, NULL, MAGIFY_WM_FILES, MAGIFY_WM_FILES, PM_REMOVE));
+    assert(Magify_IPC_ApplyFileList(&ipcCtx, packet.lParam));
+    assert(ipcCtx.fileCount == 1);
+
+    // Stop while a client is connected but has not completed its first frame.
+    HANDLE stalled = CreateFileW(MAGIFY_PIPE_NAME, GENERIC_READ | GENERIC_WRITE,
+        0, NULL, OPEN_EXISTING, 0, NULL);
+    assert(stalled != INVALID_HANDLE_VALUE);
+    DWORD stopTick = GetTickCount();
+
+    Magify_IPC_StopServer();
+    assert(GetTickCount() - stopTick < 1000);
+    CloseHandle(stalled);
+    // Server ownership and handles are released for an immediate restart.
+    assert(Magify_IPC_StartServer(&ipcCtx));
     Magify_IPC_StopServer();
     system("taskkill /f /im magify.exe >nul 2>nul");
     printf("  Named pipe server gracefully stopped without deadlocks or lingering handles.\n");

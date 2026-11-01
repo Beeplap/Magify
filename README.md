@@ -12,6 +12,12 @@
 
 ## Overview
 
+Select one or more files in File Explorer or on the desktop and press **Ctrl+Space**
+to open Magify's radial wheel. With no file selection, or from another app, the
+shortcut opens a file picker. Press Ctrl+Space again or Escape to dismiss the wheel.
+The resident process starts at sign-in after installation, when opening Magify's
+dashboard, or on the first file invocation; it remains available after dismissal.
+
 **Magify** brings modern, tactile radial context menus directly to Windows File Explorer. Right-click any file (or selection of files) and select **Magify** to summon a sleek, 120fps hardware-accelerated radial HUD right at your cursor position.
 
 Convert image formats, generate multi-resolution `.ico` files, compile images into native PDF 1.4 documents, crop with live aspect-ratio guides, compress under strict byte-size targets (e.g., strictly under 200 KB for web uploads), batch rename with an inline floating glass HUD, or package files into PKZIP archives—all with zero bloat and near-instant startup.

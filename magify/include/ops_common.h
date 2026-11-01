@@ -7,6 +7,7 @@ BOOL Magify_RenameFiles(MagifyContext *ctx, const WCHAR *newBaseName);
 BOOL Magify_CreateZipArchive(MagifyContext *ctx, const WCHAR *outputZipPath);
 void Magify_CompressGenericZip(MagifyContext *ctx);
 void Magify_LaunchWorker(MagifyContext *ctx, LPTHREAD_START_ROUTINE func, void *arg);
+/* Requests cancellation without blocking. Retains a live worker's handle. */
 void Magify_CancelWorker(MagifyContext *ctx);
 BOOL Magify_GetSafeOutputPath(const WCHAR *srcPath, const WCHAR *suffix, const WCHAR *newExt, BOOL overwriteInPlace, WCHAR *outPath, WCHAR *tempPath);
 BOOL Magify_FinalizeOutputFile(const WCHAR *originalPath, const WCHAR *tempPath, const WCHAR *finalPath, BOOL overwriteInPlace, MagifyContext *ctx);
